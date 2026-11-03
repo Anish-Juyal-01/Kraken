@@ -21,3 +21,10 @@ class StubClient:
 @pytest.fixture
 def stub_client() -> StubClient:
     return StubClient()
+
+
+@pytest.fixture
+def ledger(tmp_path):
+    from kraken.hallmark.ledger import Ledger
+
+    return Ledger(str(tmp_path / "ledger.db"))

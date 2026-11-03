@@ -1,0 +1,14 @@
+openapi: 3.0.0
+info:
+  title: Demo
+  version: "1"
+paths: {}
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        user_id:
+          type: integer
+        email:
+          type: string
