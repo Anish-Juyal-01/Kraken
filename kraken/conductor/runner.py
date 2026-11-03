@@ -11,6 +11,12 @@ from kraken.switch_client import SwitchClient, SwitchError
 log = logging.getLogger(__name__)
 
 _LIVE_STATES = ("live", "open")
+# An invite adds a member without waking it, and the kickoff predates membership:
+# invited agents get a mention so they start work.
+_WAKE = {
+    "charter": "post your BID as described in the room instructions",
+    "forge": "review against the brief; post ACCEPTED on its own line when every criterion is met",
+}
 
 
 def merge_data(ledger: Ledger, rid: int, **kv) -> None:
@@ -80,6 +86,16 @@ class ActionRunner:
         elif a.kind == "close":
             await self.client.send(req.origin_room, a.text or "")
 
+    async def _connect_parent(self, req: Request) -> None:
+        """create_room_from_yaml files the new room under the connected room's run, so
+        connect to the request's most recently bound stage room (else its origin room)."""
+        rooms = list(self.ledger.get_request(req.id).rooms.values())
+        parent = rooms[-1] if rooms else req.origin_room
+        try:
+            await self.client.op("connect_to_room", room_id=parent)
+        except SwitchError as err:
+            log.warning("could not connect to %s before opening a stage: %s", parent, err)
+
     async def _open(self, req: Request, stage: str, extra: dict) -> None:
         extra = dict(extra)
         invitees: list[str] = []
@@ -100,13 +116,22 @@ class ActionRunner:
             pool = req.data.get("live_bidders") or [b["agent"] for b in req.bids]
             reviewers = [x for x in pool if x != req.winner]
             extra["reviewers"], invitees = reviewers, reviewers[1:]
+        await self._connect_parent(req)
         room_id = await open_stage(self.client, stage, stage_inputs(stage, req, self.cfg, **extra))
         self.ledger.bind_room(req.id, stage, room_id)
         merge_data(self.ledger, req.id, stage_started=time.time(), timed_out=None)
+        invited: list[str] = []
         for name in invitees:
             try:
                 await self.client.op("invite_agent_to_room", room_id=room_id, agent_name=name)
+                invited.append(name)
             except SwitchError as err:
                 log.warning("could not invite %s to %s: %s", name, room_id, err)
                 await self.client.send(
                     req.origin_room, f"[K-{req.id}] could not invite {name}: {err.detail}")
+        if invited:
+            mentions = " ".join(f"@{n}" for n in invited)
+            try:
+                await self.client.send(room_id, f"{mentions} [K-{req.id}] {_WAKE[stage]}")
+            except SwitchError as err:
+                log.warning("could not wake %s in %s: %s", mentions, room_id, err)

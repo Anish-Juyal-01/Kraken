@@ -67,6 +67,16 @@ class Ledger:
             self._db.executescript(_SCHEMA)
             self._db.commit()
 
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+    def __enter__(self) -> "Ledger":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
     def _exec(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
             cur = self._db.execute(sql, args)
@@ -138,11 +148,12 @@ class Ledger:
         return [(r[0], _claim(r[1:-1]), r[-1]) for r in rows]
 
     # requests
-    def new_request(self, owner: str, text: str, origin_room: str, state: str = "SPARK") -> int:
+    def new_request(self, owner: str, text: str, origin_room: str, state: str = "SPARK",
+                    storm_mode: str = "auto") -> int:
         return self._exec(
             "INSERT INTO requests (owner, text, origin_room, state, storm_mode, storm_round, "
-            "brief, bids, winner, rooms, data) VALUES (?, ?, ?, ?, 'auto', 0, NULL, '[]', NULL, "
-            "'{}', '{}')", (owner, text, origin_room, state)).lastrowid
+            "brief, bids, winner, rooms, data) VALUES (?, ?, ?, ?, ?, 0, NULL, '[]', NULL, "
+            "'{}', '{}')", (owner, text, origin_room, state, storm_mode)).lastrowid
 
     def get_request(self, rid: int) -> Request:
         rows = self._all("SELECT id, owner, text, origin_room, state, storm_mode, storm_round, "

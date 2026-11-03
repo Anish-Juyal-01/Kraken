@@ -27,11 +27,12 @@ rooms:
     kickoff: |
       This is the Kraken requests room. Mention @kraken with what you want built.
   - name: "{hallmark}"
-    description: The decision ledger. Kraken posts every settled decision here.
+    description: The decision ledger. Kraken keeps it as the room document Hallmark.
     channel_type: channel_private
     agents: ["{kraken}"]
     users: ["{$creator}"]
     instructions: |
-      Kraken publishes Hallmark entries here, one message per settled decision.
+      Kraken keeps the decision ledger in this room as one room document named
+      Hallmark, and rewrites it whenever a decision is settled. Read it there.
     kickoff: |
-      This is the Kraken Hallmark room. Settled decisions are posted here.
+      This is the Kraken Hallmark room. Settled decisions are kept in the Hallmark room document.

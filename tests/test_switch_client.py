@@ -242,3 +242,35 @@ async def test_send_returns_event_id(switch, client):
     )
     assert await client.send("r", "hello") == "e1"
     assert json.loads(route.calls.last.request.content) == {"room_id": "r", "content": "hello"}
+
+
+def test_parse_sse_skips_malformed_data_with_warning(caplog):
+    lines = ["id: 3", "event: message", "data: {not json", "",
+             "id: 4", "event: message", 'data: {"sequence": 4}', ""]
+    with caplog.at_level("WARNING", logger="kraken.switch_client"):
+        assert list(parse_sse(lines)) == [("4", "message", {"sequence": 4})]
+    assert any("malformed" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("first", [httpx.ConnectError("boom"), httpx.Response(503)])
+async def test_stream_failure_is_logged(switch, client, first, caplog):
+    switch.get(f"/agents/{AGENT}/events").mock(side_effect=[first, sse(msg(1))])
+    with caplog.at_level("WARNING", logger="kraken.switch_client"):
+        async with aclosing(client.events()) as stream:
+            async for _ in stream:
+                break
+    assert any("event stream" in r.message for r in caplog.records)
+
+
+async def test_heartbeat_failures_are_logged_and_beats_continue(switch, client, caplog):
+    route = switch.post(f"/agents/{AGENT}/connection/beat").mock(
+        side_effect=[httpx.ConnectError("boom"), httpx.Response(500, json={"detail": "x"}),
+                     httpx.Response(409, json={"detail": "x"})])
+    with caplog.at_level("WARNING", logger="kraken.switch_client"):
+        task = asyncio.create_task(client.heartbeat_forever(interval=0.01))
+        await asyncio.wait_for(client._reopen.wait(), 2)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    msgs = [r.message for r in caplog.records]
+    assert any("heartbeat failed" in m for m in msgs) and any("500" in m for m in msgs)
+    assert len(route.calls) == 3

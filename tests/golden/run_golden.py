@@ -66,26 +66,26 @@ def _event(body: str, sender: str, n: int) -> Event:
 
 
 async def predict(llm, pair: dict, threshold: float, min_words: int) -> str:
-    ledger = Ledger(":memory:")
-    for n, key in enumerate(("a", "b"), start=1):
-        claims = await extract_claims(llm, _event(pair[key], f"user_{key}", n), min_words)
-        added = []
-        for c in claims:
-            c = await normalize(llm, ledger, c)
-            added.append((ledger.add_claim(c), c))
-        if key == "a":
-            continue
-        raised, verdicts = [], []
-        for cid, c in added:
-            found = await detect(llm, ledger, cid, c, threshold)
-            raised += found
-            if found:
+    with Ledger(":memory:") as ledger:
+        for n, key in enumerate(("a", "b"), start=1):
+            claims = await extract_claims(llm, _event(pair[key], f"user_{key}", n), min_words)
+            added = []
+            for c in claims:
+                c = await normalize(llm, ledger, c)
+                added.append((ledger.add_claim(c), c))
+            if key == "a":
                 continue
-            for earlier_id, earlier in ledger.claims_for(c.subject, c.attribute):
-                if earlier_id != cid and norm_value(earlier.value) != norm_value(c.value):
-                    verdicts.append((await judge(llm, earlier, c)).verdict)
-        return classify(bool(raised), len(added), verdicts)
-    return "chitchat"
+            raised, verdicts = [], []
+            for cid, c in added:
+                found = await detect(llm, ledger, cid, c, threshold)
+                raised += found
+                if found:
+                    continue
+                for earlier_id, earlier in ledger.claims_for(c.subject, c.attribute):
+                    if earlier_id != cid and norm_value(earlier.value) != norm_value(c.value):
+                        verdicts.append((await judge(llm, earlier, c)).verdict)
+            return classify(bool(raised), len(added), verdicts)
+        return "chitchat"
 
 
 async def run(pairs: list[dict]) -> Counter:

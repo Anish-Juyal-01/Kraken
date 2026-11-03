@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 import time
@@ -13,7 +14,8 @@ from kraken.hallmark.ledger import Ledger, Request
 from kraken.hallmark.publish import publish
 from kraken.llm import LLM, SMART, LLMParseError
 from kraken.models import Claim, Conflict, Event
-from kraken.sonar.detect import detect
+from kraken.sonar.code_check import code_claims_for
+from kraken.sonar.detect import detect, judge, norm_value
 from kraken.sonar.extract import extract
 from kraken.sonar.normalize import normalize
 from kraken.sonar.preflight import preflight
@@ -24,6 +26,7 @@ log = logging.getLogger(__name__)
 _TIMED_STAGES = ("SPARK", "CHARTER", "FORGE", "STORM")
 _MENTION = re.compile(r"^@kraken\b[:,]?\s*", re.IGNORECASE)
 _RESOLVE_HINT = "reply 1️⃣, 2️⃣ or 🙅"
+_QUOTE_MAX = 300
 
 
 class BidPick(BaseModel):
@@ -39,12 +42,19 @@ def _render(c: Conflict) -> str:
     return f"Brief says {b.subject}.{b.attribute} = {b.value}; {source} says {a.value}"
 
 
+def _link(c: Claim) -> str:
+    if c.source == "code":
+        return f"{c.path}:{c.line}" if c.line is not None else str(c.path)
+    return f"#{c.room_id} (message {c.message_id})"
+
+
 class Dispatcher:
     def __init__(self, client: SwitchClient, llm: LLM, ledger: Ledger, cfg: Config,
                  code_index: list[Claim], self_id: str) -> None:
         self.client, self.llm, self.ledger, self.cfg = client, llm, ledger, cfg
         self.code_index, self.self_id = code_index, self_id
         self.room_ids: dict[str, str] = {}
+        self._room_names: dict[str, str] = {}  # room id -> name, from list_rooms
         self.runner = ActionRunner(client, ledger, cfg, lambda: self.on_decision())
         self._lock = asyncio.Lock()
         a = cfg.agents
@@ -58,8 +68,10 @@ class Dispatcher:
             log.warning("no room id for %s; Hallmark not published", self.cfg.rooms.hallmark)
             return
         try:
-            await publish(self.client, self.ledger, room_id)
-        except SwitchError:
+            if not self._room_names:
+                await self._load_room_names()
+            await publish(self.client, self.ledger, room_id, self._room_names)
+        except Exception:  # a publish failure must never strand a resolution
             log.exception("Hallmark publish failed")
 
     # ---- entry points -------------------------------------------------
@@ -93,7 +105,11 @@ class Dispatcher:
                 req = self.ledger.get_request(tag)
             except KeyError:
                 return False
-            await self.runner.say(req, f"{emoji} from {user} — received", stage_room(req.state))
+            try:
+                await self.runner.say(req, f"{emoji} from {user} — received",
+                                      stage_room(req.state))
+            except Exception:
+                log.exception("reaction receipt for K-%s failed", tag)
             return await self._command(cmd, None)
 
     async def tick(self, now: float) -> None:
@@ -158,7 +174,8 @@ class Dispatcher:
 
     async def _new_request(self, ev: Event, name: str, body: str) -> None:
         text = _MENTION.sub("", body).strip() or body
-        rid = self.ledger.new_request(owner=name, text=text, origin_room=ev.room_id)
+        rid = self.ledger.new_request(owner=name, text=text, origin_room=ev.room_id,
+                                      storm_mode=self.cfg.storm.default_mode)
         await self.runner.run(self.ledger.get_request(rid),
                               [Action(kind="open_stage", stage="spark")])
 
@@ -194,15 +211,32 @@ class Dispatcher:
             chosen = self.ledger.get_claim(a_id if cmd.arg == "1" else b_id)
             self.ledger.add_decision(chosen, decided_by=cmd.user, supersedes=None)
             self.ledger.mark_pair(a_id, b_id, "resolved")
+            await self._close_siblings(req, chosen)
             await self.on_decision()
+            what = f"{chosen.subject}.{chosen.attribute}"
             brief = ("Make the system consistent with the decision: "
-                     f"{chosen.subject}.{chosen.attribute} = {chosen.value} (decided by {cmd.user})")
+                     f"{what} = {chosen.value} (decided by {cmd.user}). "
+                     f"Acceptance: (1) every place that uses {what} matches the decided value; "
+                     "(2) a test asserts it.")
             await self.apply(req.id, Signal(kind="resolved", data={"brief": brief}))
         elif cmd.kind == "not_conflict":
             self.ledger.mark_pair(a_id, b_id, "dismissed")
+            await self._close_siblings(req, self.ledger.get_claim(b_id))
             await self.apply(req.id, cmd)
         else:
             await self.runner.say(req, f"[K-{req.id}] {_RESOLVE_HINT}", "sonar-resolution")
+
+    async def _close_siblings(self, req: Request, c: Claim) -> None:
+        """Settling one resolution settles every other open one on the same subject (R21)."""
+        for other in self.ledger.open_requests():
+            if other.id == req.id or other.state != "RESOLVING" or "b" not in other.data:
+                continue
+            b = self.ledger.get_claim(other.data["b"])
+            if (b.subject, b.attribute) != (c.subject, c.attribute):
+                continue
+            self.ledger.update_request(other.id, state="CLOSED")
+            await self.runner.say(other, f"[K-{other.id}] closed: settled in [K-{req.id}]",
+                                  "sonar-resolution")
 
     # ---- the conductor loop -------------------------------------------
     async def apply(self, rid: int, inp: Signal | Command) -> None:
@@ -305,12 +339,68 @@ class Dispatcher:
             for raw in await extract(self.llm, ev, self.self_id, self.cfg.sonar.min_words):
                 claim = await normalize(self.llm, self.ledger, raw)
                 cid = self.ledger.add_claim(claim)
+                await self._store_source(cid, ev)
                 for conflict in await detect(self.llm, self.ledger, cid, claim,
                                              self.cfg.sonar.threshold):
                     await self._open_resolution(conflict, cid)
+                await self._code_conflicts(cid, claim)
         except LLMParseError:
             log.warning("unparsable LLM reply for message %s; skipped",
                         ev.payload.get("message_id"))
+
+    async def _load_room_names(self) -> None:
+        try:
+            rooms = await self.client.op("list_rooms")
+        except SwitchError as err:
+            log.warning("list_rooms failed: %s", err)
+            return
+        for r in rooms if isinstance(rooms, list) else []:
+            if r.get("room_id") and r.get("name"):
+                self._room_names[r["room_id"]] = r["name"]
+
+    async def _room_name(self, room_id: str) -> str:
+        if room_id not in self._room_names:
+            await self._load_room_names()
+            self._room_names.setdefault(room_id, room_id)  # unknown: fall back to the id
+        return self._room_names[room_id]
+
+    async def _store_source(self, claim_id: int, ev: Event) -> None:
+        """Keep the message a chat claim came from, for the resolution room (R22)."""
+        p = ev.payload
+        src = {"sender_name": p.get("sender_name") or p.get("sender") or "",
+               "body": p.get("body") or "", "room_name": await self._room_name(ev.room_id)}
+        self.ledger.set_meta(f"claimsrc:{claim_id}", json.dumps(src))
+
+    def _side(self, claim_id: int, c: Claim) -> tuple[str, str, str]:
+        """(quote, link, user) for one side of a resolution."""
+        if c.source == "code":
+            return c.value, _link(c), c.speaker
+        raw = self.ledger.get_meta(f"claimsrc:{claim_id}")
+        if raw is None:
+            return f"{c.value} ({c.speaker})", _link(c), c.speaker
+        src = json.loads(raw)
+        return src["body"][:_QUOTE_MAX], f"#{src['room_name']}", src["sender_name"]
+
+    async def _code_conflicts(self, chat_id: int, chat: Claim) -> None:
+        """Judge a stored chat claim against the code index (R20)."""
+        for code in code_claims_for(self.code_index, chat.subject, chat.attribute):
+            if norm_value(code.value) == norm_value(chat.value):
+                continue
+            key = f"codeclaim:{code.path}:{code.line}:{code.subject}:{code.attribute}"
+            stored = self.ledger.get_meta(key)
+            code_id = int(stored) if stored is not None else None
+            if code_id is not None and self.ledger.get_claim(code_id) != code:
+                code_id = None  # the code changed since it was stored
+            if code_id is not None and self.ledger.pair_seen(code_id, chat_id):
+                continue
+            conflict = await judge(self.llm, code, chat)
+            if conflict.verdict != "conflict" or conflict.confidence < self.cfg.sonar.threshold:
+                continue
+            if code_id is None:
+                code_id = self.ledger.add_claim(code)
+                self.ledger.set_meta(key, str(code_id))
+            self.ledger.mark_pair(code_id, chat_id, "raised")
+            await self._open_resolution(conflict, chat_id)
 
     async def _open_resolution(self, conflict: Conflict, b_id: int) -> None:
         a, b = conflict.a, conflict.b
@@ -318,7 +408,8 @@ class Dispatcher:
                     if c == a and i != b_id and self.ledger.pair_seen(i, b_id))
         rid = self.ledger.new_request(owner=b.speaker,
                                       text=f"conflict on {b.subject}.{b.attribute}",
-                                      origin_room=b.room_id, state="RESOLVING")
+                                      origin_room=b.room_id, state="RESOLVING",
+                                      storm_mode=self.cfg.storm.default_mode)
         self.ledger.update_request(rid, data={"a": a_id, "b": b_id})
         await self.runner.run(self.ledger.get_request(rid),
                               [Action(kind="open_stage", stage="sonar-resolution")],
@@ -326,12 +417,12 @@ class Dispatcher:
 
     def _resolution_extra(self, rid: int, a_id: int, b_id: int) -> dict:
         a, b = self.ledger.get_claim(a_id), self.ledger.get_claim(b_id)
+        quote_a, link_a, user_a = self._side(a_id, a)
+        quote_b, link_b, user_b = self._side(b_id, b)
         return {
             "subject": f"{b.subject}.{b.attribute}",
-            "quote_a": f"{a.value} ({a.speaker})",
-            "link_a": f"#{a.room_id} (message {a.message_id})", "user_a": a.speaker,
-            "quote_b": f"{b.value} ({b.speaker})",
-            "link_b": f"#{b.room_id} (message {b.message_id})", "user_b": b.speaker,
+            "quote_a": quote_a, "link_a": link_a, "user_a": user_a,
+            "quote_b": quote_b, "link_b": link_b, "user_b": user_b,
             "prompt_text": prompt(rid, "Which one is true?",
                                   ["1️⃣ first", "2️⃣ second", "🙅 not a conflict"]),
         }

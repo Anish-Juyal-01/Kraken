@@ -1,12 +1,14 @@
 import json
+from pathlib import Path
 
 import pytest
 
-from kraken.conductor.state import Signal
+from kraken.conductor.state import Action, Signal
 from kraken.config import Config
 from kraken.dispatch import Dispatcher
 from kraken.llm import LLMParseError
 from kraken.models import Claim, Event
+from kraken.sonar.code_check import index_code
 from kraken.switch_client import SwitchError
 from tests.fakes import FakeLLM
 
@@ -24,9 +26,11 @@ class MockClient:
         self.fail_create = fail_create
         self.documents = documents if documents is not None else []
         self.n = 0
+        self.calls: list[tuple[str, dict]] = []
 
     async def op(self, name, /, **args):
         self.ops.setdefault(name, []).append(args)
+        self.calls.append((name, args))
         if name == "create_room_from_yaml":
             if self.fail_create:
                 raise self.fail_create
@@ -40,6 +44,11 @@ class MockClient:
             return {"documents": self.documents}
         if name == "load_internal_documents":
             return [{"id": args["ids"][0], "content": "BRIEF TEXT"}]
+        if name == "create_room_document":
+            return {"document_id": "doc-1"}
+        if name == "list_rooms":
+            return [{"room_id": REQ_ROOM, "name": "kraken-requests"},
+                    {"room_id": "chat", "name": "product"}]
         return {"ok": True}
 
     def offline_listed(self):
@@ -228,7 +237,9 @@ async def test_resolution_pick_stores_decision_and_opens_charter(ledger):
     req = ledger.get_request(1)
     assert req.state == "CHARTER"
     assert req.brief == ("Make the system consistent with the decision: "
-                         "user_id.type = uuid string (decided by carol)")
+                         "user_id.type = uuid string (decided by carol). "
+                         "Acceptance: (1) every place that uses user_id.type matches the "
+                         "decided value; (2) a test asserts it.")
     assert len(client.created("Charter")) == 1
 
 
@@ -388,7 +399,9 @@ async def test_resolution_pick_publishes_hallmark(ledger):
     client, d = await open_resolution(ledger)
     d.room_ids["kraken-hallmark"] = "hm"
     await d.handle(ev(3, "1️⃣", room="room-1", name="carol"))
-    assert client.ops["connect_to_room"][-1] == {"room_id": "hm"}
+    names = [n for n, _ in client.calls]
+    i = names.index("create_room_document")
+    assert client.calls[i - 1] == ("connect_to_room", {"room_id": "hm"})
     (created,) = client.ops["create_room_document"]
     assert "user_id.type** = uuid string" in created["content"]
 
@@ -412,3 +425,194 @@ async def test_missing_hallmark_room_is_skipped(ledger):
     client, d = await open_resolution(ledger)
     await d.handle(ev(3, "1️⃣", room="room-1", name="carol"))
     assert "create_room_document" not in client.ops
+
+
+# ---- final review ----------------------------------------------------------
+async def test_invited_bidders_are_woken_with_a_mention(ledger):
+    client, d = make(ledger)
+    rid = request_in(ledger, "PREFLIGHT", brief="B")
+    await d.apply(rid, Signal(kind="preflight_clear"))
+    wake = [t for t in client.texts("room-1") if "@codex-coder" in t and "@opencode-coder" in t]
+    assert len(wake) == 1
+    assert f"[K-{rid}]" in wake[0] and "post your BID as described in the room instructions" in wake[0]
+
+
+async def test_invited_reviewers_are_woken_with_a_mention(ledger):
+    client, d = make(ledger)
+    rid = request_in(ledger, "FORGE", rooms={"charter": "ch"}, brief="B", winner="claude-coder",
+                     bids=[{"agent": b} for b in BIDDERS], data={"live_bidders": BIDDERS})
+    await d.runner.run(ledger.get_request(rid), [Action(kind="open_stage", stage="forge")])
+    room = ledger.get_request(rid).rooms["forge"]
+    assert [i["agent_name"] for i in client.ops["invite_agent_to_room"]] == ["opencode-coder"]
+    wake = [t for t in client.texts(room) if "@opencode-coder" in t]
+    assert len(wake) == 1 and f"[K-{rid}]" in wake[0]
+    assert "review against the brief; post ACCEPTED on its own line" in wake[0]
+
+
+def connect_before_create(client):
+    """room_id connected to right before each create_room_from_yaml."""
+    out, connected = [], None
+    for name, args in client.calls:
+        if name == "connect_to_room":
+            connected = args["room_id"]
+        elif name == "create_room_from_yaml":
+            out.append(connected)
+    return out
+
+
+async def test_stage_room_is_filed_under_the_latest_stage_room(ledger):
+    client, d = make(ledger)
+    rid = request_in(ledger, "FORGE", rooms={"spark": "sp", "charter": "ch"}, brief="B",
+                     winner="claude-coder", bids=[{"agent": b} for b in BIDDERS],
+                     data={"live_bidders": BIDDERS})
+    await d.runner.run(ledger.get_request(rid), [Action(kind="open_stage", stage="forge")])
+    assert connect_before_create(client) == ["ch"]
+
+
+async def test_first_stage_room_is_filed_under_the_origin_room(ledger):
+    client, d = make(ledger)
+    await d.handle(ev(1, "@kraken build it", addressed=True))
+    assert connect_before_create(client) == [REQ_ROOM]
+
+
+FREE_TIER_MSG = "#product: free tier is 100 requests per day"
+LIMITS = Path(__file__).parent / "fixtures" / "code" / "limits.yaml"
+
+
+def free_tier_llm():
+    return FakeLLM([YES, jclaims(("free_tier", "value", "100 requests per day")), CONFLICT])
+
+
+async def test_chat_claim_against_code_opens_resolution(ledger):
+    client, d = make(ledger, llm=free_tier_llm())
+    d.code_index = index_code([str(LIMITS)])
+    await d.handle(ev(1, FREE_TIER_MSG, name="pm"))
+    (created,) = client.created("Sonar")
+    inputs = created["inputs"]
+    assert inputs["subject"] == "free_tier.value"
+    assert inputs["link_a"].endswith("limits.yaml:2") and "1000" in inputs["quote_a"]
+    req = ledger.get_request(1)
+    assert req.state == "RESOLVING"
+    code = ledger.get_claim(req.data["a"])
+    assert code.source == "code" and code.value == "1000" and code.line == 2
+    assert ledger.get_claim(req.data["b"]).value == "100 requests per day"
+    assert ledger.pair_seen(req.data["a"], req.data["b"])
+
+
+async def test_same_chat_message_again_opens_no_second_room(ledger):
+    client, d = make(ledger, llm=free_tier_llm())
+    d.code_index = index_code([str(LIMITS)])
+    await d.handle(ev(1, FREE_TIER_MSG, name="pm"))
+    await d.handle(ev(2, FREE_TIER_MSG, name="pm", mid="m1"))  # redelivered
+    assert len(client.created("Sonar")) == 1
+
+
+async def test_code_claim_is_stored_once(ledger):
+    llm = FakeLLM([YES, jclaims(("free_tier", "value", "100 requests per day")), CONFLICT,
+                   YES, jclaims(("free_tier", "value", "200 requests per day")), CONFLICT,
+                   CONFLICT])
+    client, d = make(ledger, llm=llm)
+    d.code_index = index_code([str(LIMITS)])
+    await d.handle(ev(1, FREE_TIER_MSG, name="pm"))
+    await d.handle(ev(2, "#product: actually the free tier is 200 requests per day", name="pm"))
+    code = [i for i, c in ledger.claims_for("free_tier", "value") if c.source == "code"]
+    assert len(code) == 1
+    assert len(client.created("Sonar")) == 3  # chat1-code, chat2-chat1, chat2-code
+
+
+async def test_matching_code_value_raises_nothing(ledger):
+    client, d = make(ledger, llm=FakeLLM([YES, jclaims(("free_tier", "value", "1000"))]))
+    d.code_index = index_code([str(LIMITS)])
+    await d.handle(ev(1, "#product: the free tier is 1000 requests per day", name="pm"))
+    assert client.created("Sonar") == [] and ledger.claims_for("free_tier", "value")[0][1].source == "chat"
+
+
+async def test_resolution_room_quotes_the_messages(ledger):
+    client, d = await open_resolution(ledger)
+    inputs = client.created("Sonar")[0]["inputs"]
+    assert inputs["quote_a"] == LONG1 and inputs["user_a"] == "ann"
+    assert inputs["quote_b"] == LONG2 and inputs["user_b"] == "bob"
+    assert inputs["link_a"] == inputs["link_b"] == "#kraken-requests"
+    src = json.loads(ledger.get_meta("claimsrc:1"))
+    assert src == {"sender_name": "ann", "body": LONG1, "room_name": "kraken-requests"}
+
+
+async def test_claim_source_truncated_and_unknown_room_falls_back_to_id(ledger):
+    long = "we decided that user_id is a uuid string " + "x" * 400
+    client, d = make(ledger, llm=FakeLLM([YES, jclaims(("user_id", "type", "uuid string")),
+                                          YES, jclaims(("user_id", "type", "integer")),
+                                          CONFLICT]))
+    await d.handle(ev(1, long, room="elsewhere", sender="u-a", name="ann"))
+    await d.handle(ev(2, LONG2, room="chat", sender="u-b", name="bob"))
+    inputs = client.created("Sonar")[0]["inputs"]
+    assert inputs["quote_a"] == long[:300] and inputs["link_a"] == "#elsewhere"
+    assert inputs["link_b"] == "#product"
+
+
+async def test_hallmark_shows_room_name(ledger):
+    client, d = await open_resolution(ledger)
+    d.room_ids["kraken-hallmark"] = "hm"
+    await d.handle(ev(3, "1️⃣", room="room-1", name="carol"))
+    (created,) = client.ops["create_room_document"]
+    assert "source #kraken-requests" in created["content"]
+
+
+def resolving(ledger, subject, values, room):
+    ids = [ledger.add_claim(Claim(subject=subject, attribute="type", value=v, speaker="u",
+                                  room_id="chat", message_id=f"m-{v}", timestamp=1,
+                                  confidence=0.9)) for v in values]
+    return request_in(ledger, "RESOLVING", rooms={"sonar-resolution": room},
+                      data={"a": ids[0], "b": ids[1]})
+
+
+@pytest.mark.parametrize("answer", ["1️⃣", "🙅"])
+async def test_settling_a_resolution_closes_its_siblings(ledger, answer):
+    client, d = make(ledger)
+    k1 = resolving(ledger, "user_id", ["uuid", "int"], "s1")
+    k2 = resolving(ledger, "user_id", ["uuid", "string"], "s2")
+    k3 = resolving(ledger, "order_id", ["uuid", "int"], "s3")
+    await d.handle(ev(1, answer, room="s1", name="carol"))
+    assert ledger.get_request(k2).state == "CLOSED"
+    assert client.texts("s2") == [f"[K-{k2}] closed: settled in [K-{k1}]"]
+    assert ledger.get_request(k3).state == "RESOLVING" and client.texts("s3") == []
+
+
+async def test_unexpected_publish_error_does_not_strand_resolution(ledger):
+    client, d = await open_resolution(ledger)
+    d.room_ids["kraken-hallmark"] = "hm"
+    orig = client.op
+
+    async def op(name, /, **args):
+        if name == "create_room_document":
+            raise RuntimeError("boom")
+        return await orig(name, **args)
+
+    client.op = op
+    await d.handle(ev(3, "1️⃣", room="room-1", name="carol"))
+    assert ledger.get_request(1).state == "CHARTER"
+
+
+async def test_reaction_runs_command_when_receipt_fails(ledger):
+    client, d = make(ledger)
+    rid = request_in(ledger, "FORGE", rooms={"forge": "fg"}, winner="claude-coder",
+                     data={"gate": "merge", "live_bidders": BIDDERS})
+    orig = client.send
+    calls = []
+
+    async def send(room_id, content):
+        calls.append(content)
+        if len(calls) == 1:
+            raise SwitchError(500, "boom")
+        return await orig(room_id, content)
+
+    client.send = send
+    assert await d.handle_reaction("👍", "sam", rid) is True
+    assert ledger.get_request(rid).state == "STORM"
+
+
+async def test_new_requests_use_default_storm_mode(ledger):
+    client, d = make(ledger, llm=conflict_llm(), storm={"default_mode": "drill"})
+    await d.handle(ev(1, "@kraken build it", addressed=True))
+    await d.handle(ev(2, LONG1, sender="u-a", name="ann"))
+    await d.handle(ev(3, LONG2, sender="u-b", name="bob"))
+    assert [r.storm_mode for r in ledger.open_requests()] == ["drill", "drill"]

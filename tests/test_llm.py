@@ -28,7 +28,7 @@ async def test_first_try_and_request_shape(stub_client):
     out = await ClaudeLLM(client=stub_client).json(SMART, "sys", "usr", OkModel)
     assert out.ok is False
     req = stub_client.requests[0]
-    assert req["model"] == SMART and req["system"] == "sys" and req["max_tokens"] == 1024
+    assert req["model"] == SMART and req["system"] == "sys" and req["max_tokens"] == 4096
     assert req["messages"] == [{"role": "user", "content": "usr"}]
 
 
@@ -45,3 +45,19 @@ async def test_fake_llm():
     with pytest.raises(LLMParseError):
         await fake.json(FAST, "s3", "u3", OkModel)
     assert fake.calls[1] == {"model": FAST, "system": "s2", "user": "u2", "schema": OkModel}
+
+
+async def test_truncated_reply_is_retried(stub_client):
+    stub_client.replies = ['{"ok": true}', '{"ok": false}']
+    stub_client.stop_reasons = ["max_tokens", "end_turn"]
+    out = await ClaudeLLM(client=stub_client).json(FAST, "s", "u", OkModel)
+    assert out.ok is False and len(stub_client.requests) == 2
+
+
+async def test_two_bad_stop_reasons_raise(stub_client):
+    stub_client.replies = ['{"ok": true}', '{"ok": true}']
+    stub_client.stop_reasons = ["max_tokens", "refusal"]
+    with pytest.raises(LLMParseError):
+        await ClaudeLLM(client=stub_client).json(FAST, "s", "u", OkModel)
+    assert len(stub_client.requests) == 2
+    assert set(stub_client.requests[0]) == {"model", "max_tokens", "system", "messages", "user"}

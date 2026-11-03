@@ -7,6 +7,7 @@ import discord
 import httpx
 
 from kraken.config import load_config
+from kraken.main import load_env
 
 log = logging.getLogger("kraken.relay")
 _TAG = re.compile(r"\[K-(\d+)\]")
@@ -51,8 +52,20 @@ def make_client(url: str, secret: str) -> discord.Client:
     return client
 
 
+def check_env(env) -> str | None:
+    """Return a one-line error if a required relay setting is missing or empty, else None."""
+    missing = [k for k in ("DISCORD_RELAY_TOKEN", "KRAKEN_RELAY_SECRET") if not env.get(k)]
+    if not missing:
+        return None
+    return f"Missing {', '.join(missing)}: set it in .env (see README step 9)."
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    load_env()
+    error = check_env(os.environ)
+    if error:
+        raise SystemExit(error)
     cfg = load_config()
     url = f"http://127.0.0.1:{cfg.relay_port}/relay/reaction"
     make_client(url, os.environ["KRAKEN_RELAY_SECRET"]).run(os.environ["DISCORD_RELAY_TOKEN"])

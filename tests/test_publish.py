@@ -10,9 +10,10 @@ def claim(value, **kw):
 
 
 class DocClient:
-    def __init__(self, fail_update=None):
+    def __init__(self, fail_update=None, documents=None):
         self.calls: list[tuple[str, dict]] = []
         self.fail_update = fail_update
+        self.documents = documents or []
         self.n = 0
 
     async def op(self, name, /, **args):
@@ -22,6 +23,8 @@ class DocClient:
             return {"document_id": f"doc-{self.n}"}
         if name == "update_room_document" and self.fail_update:
             raise self.fail_update
+        if name == "connect_to_room":
+            return {"documents": self.documents}
         return {"ok": True}
 
     def named(self, name):
@@ -67,3 +70,21 @@ async def test_update_404_falls_back_to_create(ledger):
     await publish(client, ledger, "hm")
     assert len(client.named("create_room_document")) == 1
     assert ledger.get_meta("hallmark_doc_id") == "doc-1"
+
+
+async def test_existing_hallmark_doc_is_reused_without_stored_id(ledger):
+    client = DocClient(documents=[{"id": "other", "name": "brief"},
+                                  {"id": "doc-old", "name": "Hallmark"}])
+    ledger.add_decision(claim("uuid"), "carol", None)
+    await publish(client, ledger, "hm")
+    assert client.named("create_room_document") == []
+    (upd,) = client.named("update_room_document")
+    assert upd["document_id"] == "doc-old" and "uuid" in upd["content"]
+    assert ledger.get_meta("hallmark_doc_id") == "doc-old"
+
+
+def test_render_uses_room_names_when_known(ledger):
+    ledger.add_decision(claim("uuid"), "carol", None)
+    ledger.add_decision(claim("int", subject="order_id", room_id="r2"), "ann", None)
+    lines = render(ledger.decisions(), {"r1": "product"}).splitlines()
+    assert lines[0].endswith("source #r2") and lines[1].endswith("source #product")

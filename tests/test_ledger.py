@@ -11,15 +11,15 @@ def mk(subject="auth", attribute="method", value="jwt", **kw):
     return Claim(**base)
 
 
-def test_pair_is_unordered(tmp_path):
-    L = Ledger(str(tmp_path / "k.db"))
+def test_pair_is_unordered(tmp_path, open_ledger):
+    L = open_ledger(str(tmp_path / "k.db"))
     L.mark_pair(3, 9, "raised")
     assert L.pair_seen(9, 3)
     assert not L.pair_seen(1, 2)
 
 
-def test_mark_pair_upserts(tmp_path):
-    L = Ledger(str(tmp_path / "k.db"))
+def test_mark_pair_upserts(tmp_path, open_ledger):
+    L = open_ledger(str(tmp_path / "k.db"))
     a = L.add_claim(mk()); b = L.add_claim(mk(value="session"))
     L.mark_pair(a, b, "raised")
     L.mark_pair(b, a, "dismissed")
@@ -29,12 +29,12 @@ def test_mark_pair_upserts(tmp_path):
     assert L.dismissal_count("auth", "other") == 0
 
 
-def test_state_survives_reopen(tmp_path):
-    L = Ledger(str(tmp_path / "k.db"))
+def test_state_survives_reopen(tmp_path, open_ledger):
+    L = open_ledger(str(tmp_path / "k.db"))
     rid = L.new_request("sam", "build reset", "r1")
     L.update_request(rid, state="CHARTER", bids=[{"agent": "codex-coder"}], data={"pair": [1, 2]})
     L.bind_room(rid, "charter", "room-c")
-    L2 = Ledger(str(tmp_path / "k.db"))
+    L2 = open_ledger(str(tmp_path / "k.db"))
     r = L2.get_request(rid)
     assert r.state == "CHARTER" and r.bids[0]["agent"] == "codex-coder"
     assert r.rooms == {"charter": "room-c"} and r.data == {"pair": [1, 2]}
@@ -42,8 +42,8 @@ def test_state_survives_reopen(tmp_path):
     assert L2.request_for_room("nope") is None
 
 
-def test_request_defaults_and_errors(tmp_path):
-    L = Ledger(str(tmp_path / "k.db"))
+def test_request_defaults_and_errors(tmp_path, open_ledger):
+    L = open_ledger(str(tmp_path / "k.db"))
     r = L.get_request(L.new_request("sam", "t", "r1"))
     assert (r.state, r.storm_mode, r.storm_round, r.brief, r.bids, r.winner, r.rooms, r.data) == \
         ("SPARK", "auto", 0, None, [], None, {}, {})
@@ -54,8 +54,8 @@ def test_request_defaults_and_errors(tmp_path):
         L.update_request(r.id, bogus=1)
 
 
-def test_claims_for_filters_by_subject_and_attribute(tmp_path):
-    L = Ledger(str(tmp_path / "k.db"))
+def test_claims_for_filters_by_subject_and_attribute(tmp_path, open_ledger):
+    L = open_ledger(str(tmp_path / "k.db"))
     i1 = L.add_claim(mk(path="a.py", line=3))
     L.add_claim(mk(subject="db"))
     L.add_claim(mk(attribute="expiry"))
@@ -64,8 +64,8 @@ def test_claims_for_filters_by_subject_and_attribute(tmp_path):
     assert L.get_claim(i1) == got[0][1]
 
 
-def test_aliases_and_subjects(tmp_path):
-    L = Ledger(str(tmp_path / "k.db"))
+def test_aliases_and_subjects(tmp_path, open_ledger):
+    L = open_ledger(str(tmp_path / "k.db"))
     assert L.alias("login") is None
     L.set_alias("login", "auth")
     L.set_alias("login", "authentication")
@@ -74,8 +74,8 @@ def test_aliases_and_subjects(tmp_path):
     assert sorted(L.known_subjects()) == ["auth", "db"]
 
 
-def test_decisions_supersede(tmp_path):
-    L = Ledger(str(tmp_path / "k.db"))
+def test_decisions_supersede(tmp_path, open_ledger):
+    L = open_ledger(str(tmp_path / "k.db"))
     d1 = L.add_decision(mk(value="jwt"), "sam", None)
     d2 = L.add_decision(mk(value="session"), "ann", d1)
     d3 = L.add_decision(mk(subject="db"), "ann", None)
@@ -84,12 +84,12 @@ def test_decisions_supersede(tmp_path):
     assert out[1][1].value == "session" and out[1][2] == "ann"
 
 
-def test_meta_and_last_sequence_roundtrip(tmp_path):
-    L = Ledger(str(tmp_path / "k.db"))
+def test_meta_and_last_sequence_roundtrip(tmp_path, open_ledger):
+    L = open_ledger(str(tmp_path / "k.db"))
     assert L.last_sequence() is None and L.get_meta("x") is None
     L.set_last_sequence(41); L.set_last_sequence(42)
     L.set_meta("x", "y")
-    L2 = Ledger(str(tmp_path / "k.db"))
+    L2 = open_ledger(str(tmp_path / "k.db"))
     assert L2.last_sequence() == 42 and L2.get_meta("x") == "y"
 
 
@@ -98,3 +98,20 @@ def test_open_requests_excludes_closed(ledger):
     b = ledger.new_request("sam", "b", "r")
     ledger.update_request(a, state="CLOSED")
     assert [r.id for r in ledger.open_requests()] == [b]
+
+
+def test_close_and_context_manager(tmp_path):
+    import sqlite3
+
+    with Ledger(str(tmp_path / "k.db")) as L:
+        L.set_meta("x", "y")
+    with pytest.raises(sqlite3.ProgrammingError):
+        L.get_meta("x")
+    L2 = Ledger(str(tmp_path / "k.db"))
+    assert L2.get_meta("x") == "y"
+    L2.close()
+    L2.close()  # idempotent
+
+
+def test_new_request_storm_mode(ledger):
+    assert ledger.get_request(ledger.new_request("sam", "t", "r", storm_mode="drill")).storm_mode == "drill"

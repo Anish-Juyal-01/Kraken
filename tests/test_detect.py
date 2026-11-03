@@ -1,4 +1,3 @@
-from kraken.hallmark.ledger import Ledger
 from kraken.models import Claim
 from kraken.sonar.detect import JudgeAnswer, detect
 from tests.fakes import FakeLLM
@@ -45,15 +44,15 @@ async def test_below_threshold_not_raised(ledger):
     assert await detect(FakeLLM([answer(confidence=0.5)]), ledger, idb, b, 0.75) == []
 
 
-async def test_dedupe_across_instances(tmp_path):
+async def test_dedupe_across_instances(tmp_path, open_ledger):
     path = str(tmp_path / "l.db")
-    led = Ledger(path)
+    led = open_ledger(path)
     led.add_claim(claim("uuid"))
     b = claim("int")
     idb = led.add_claim(b)
     assert len(await detect(FakeLLM([answer()]), led, idb, b, 0.75)) == 1
     llm = FakeLLM([])
-    assert await detect(llm, Ledger(path), idb, b, 0.75) == []
+    assert await detect(llm, open_ledger(path), idb, b, 0.75) == []
     assert llm.calls == []
 
 

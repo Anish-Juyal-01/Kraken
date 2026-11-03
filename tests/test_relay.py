@@ -1,6 +1,6 @@
 from aiohttp.test_utils import TestClient, TestServer
 
-from kraken.relay.discord_relay import build_payload, extract_tag
+from kraken.relay.discord_relay import build_payload, check_env, extract_tag
 from kraken.relay.server import make_app
 from tests.fakes import FakeLLM
 from tests.test_dispatch import MockClient, ev, make, request_in
@@ -74,3 +74,13 @@ async def test_reaction_from_agent_or_unknown_tag_ignored(ledger):
     assert await d.handle_reaction("👍", "sam", 999) is False
     assert await d.handle_reaction("🎉", "sam", rid) is False
     assert client.sent == []
+
+
+def test_check_env_reports_missing_and_empty():
+    msg = check_env({"DISCORD_RELAY_TOKEN": "t", "KRAKEN_RELAY_SECRET": ""})
+    assert msg is not None and "KRAKEN_RELAY_SECRET" in msg and "DISCORD_RELAY_TOKEN" not in msg
+    assert "DISCORD_RELAY_TOKEN" in check_env({})
+
+
+def test_check_env_ok():
+    assert check_env({"DISCORD_RELAY_TOKEN": "t", "KRAKEN_RELAY_SECRET": "s"}) is None

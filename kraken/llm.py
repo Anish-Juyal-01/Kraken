@@ -26,6 +26,10 @@ def _strip_fence(text: str) -> str:
     return m.group(1).strip() if m else text
 
 
+class _Incomplete(Exception):
+    """The reply did not end normally (stop_reason other than end_turn)."""
+
+
 class ClaudeLLM:
     def __init__(self, client: anthropic.AsyncAnthropic | None = None) -> None:
         self._client = client or anthropic.AsyncAnthropic()
@@ -33,20 +37,25 @@ class ClaudeLLM:
     async def _ask(self, model: str, system: str, user: str) -> str:
         resp = await self._client.messages.create(
             model=model,
-            max_tokens=1024,
+            max_tokens=4096,
             system=system,
             messages=[{"role": "user", "content": user}],
         )
+        if resp.stop_reason != "end_turn":
+            raise _Incomplete(f"reply stopped early (stop_reason={resp.stop_reason})")
         return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+
+    async def _parse(self, model: str, system: str, user: str, schema: type[T]) -> T:
+        return schema.model_validate_json(_strip_fence(await self._ask(model, system, user)))
 
     async def json(self, model: str, system: str, user: str, schema: type[T]) -> T:
         try:
-            return schema.model_validate_json(_strip_fence(await self._ask(model, system, user)))
-        except ValidationError as err:
+            return await self._parse(model, system, user, schema)
+        except (ValidationError, _Incomplete) as err:
             retry_user = (
                 f"{user}\n\nYour previous reply failed validation: {err}. Reply with JSON only."
             )
         try:
-            return schema.model_validate_json(_strip_fence(await self._ask(model, system, retry_user)))
-        except ValidationError as err:
+            return await self._parse(model, system, retry_user, schema)
+        except (ValidationError, _Incomplete) as err:
             raise LLMParseError(str(err)) from err

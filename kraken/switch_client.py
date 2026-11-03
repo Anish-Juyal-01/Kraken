@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from contextlib import aclosing
 from collections.abc import AsyncIterator, Iterable, Iterator
 from typing import Any
@@ -7,6 +8,8 @@ from typing import Any
 import httpx
 
 from kraken.models import Event
+
+log = logging.getLogger(__name__)
 
 CONTROL_KINDS = {"connection_state", "gap", "evicted", "subscription_changed", "room_released"}
 REQUEST_TIMEOUT = 10.0
@@ -32,8 +35,11 @@ class _FrameParser:
         if line == "":
             frame = None
             if self._data:
-                data = json.loads("\n".join(self._data))
-                frame = (self._id, self._event or "message", data)
+                try:
+                    data = json.loads("\n".join(self._data))
+                    frame = (self._id, self._event or "message", data)
+                except json.JSONDecodeError as err:
+                    log.warning("skipping malformed SSE frame (id %s): %s", self._id, err)
             self._id, self._event, self._data = None, None, []
             return frame
         if line.startswith(":"):
@@ -103,8 +109,10 @@ class SwitchClient:
                         async with aclosing(self._read_stream(resp)) as stream:
                             async for event in stream:
                                 yield event
-            except httpx.HTTPError:
-                pass
+                    else:
+                        log.warning("event stream returned %s; reconnecting", resp.status_code)
+            except httpx.HTTPError as err:
+                log.warning("event stream failed: %r; reconnecting", err)
             await asyncio.sleep(self.reconnect_delay)
 
     async def _read_stream(self, resp: httpx.Response) -> AsyncIterator[Event]:
@@ -169,8 +177,10 @@ class SwitchClient:
                 )
                 if resp.status_code in (404, 409):
                     self._reopen.set()
-            except httpx.HTTPError:
-                pass
+                elif resp.status_code != 200:
+                    log.warning("heartbeat returned %s", resp.status_code)
+            except httpx.HTTPError as err:
+                log.warning("heartbeat failed: %r", err)
             await asyncio.sleep(interval)
 
     async def op(self, name: str, /, **args: Any) -> Any:

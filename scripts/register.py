@@ -1,8 +1,9 @@
 """One-time registration of Kraken as a Switch agent.
 
 Usage: python scripts/register.py [--url URL] [--token TOKEN] [--name NAME]
-Token defaults to env SWITCH_REGISTRATION_TOKEN; URL to env SWITCH_URL.
-Prints SWITCH_AGENT_ID / SWITCH_API_KEY lines for .env.
+Token defaults to env SWITCH_REGISTRATION_TOKEN; URL to env SWITCH_URL (both may be set in .env).
+Prints SWITCH_AGENT_ID / SWITCH_API_KEY lines for .env; for any other --name (such as
+kraken-smoke) it prints SMOKE_AGENT_ID / SMOKE_API_KEY lines instead.
 """
 
 import argparse
@@ -10,6 +11,8 @@ import os
 import sys
 
 import httpx
+
+from kraken.main import load_env
 
 BODY = {
     "name": "kraken",
@@ -26,7 +29,16 @@ BODY = {
 }
 
 
+def env_lines(name: str, agent_id: str, api_key: str) -> list[str]:
+    """The .env lines for a newly registered agent."""
+    if name == "kraken":
+        return [f"SWITCH_AGENT_ID={agent_id}", f"SWITCH_API_KEY={api_key}"]
+    return [f"# agent {name}: these are the env names scripts/smoke.py reads",
+            f"SMOKE_AGENT_ID={agent_id}", f"SMOKE_API_KEY={api_key}"]
+
+
 def main() -> int:
+    load_env()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default=os.environ.get("SWITCH_URL"))
     parser.add_argument("--token", default=os.environ.get("SWITCH_REGISTRATION_TOKEN"))
@@ -47,8 +59,8 @@ def main() -> int:
             print("If connector_type was rejected, read the valid value above and edit BODY.", file=sys.stderr)
         return 1
     data = resp.json()
-    print(f"SWITCH_AGENT_ID={data.get('agent_id') or data.get('id')}")
-    print(f"SWITCH_API_KEY={data.get('api_key')}")
+    for line in env_lines(args.name, data.get("agent_id") or data.get("id"), data.get("api_key")):
+        print(line)
     return 0
 
 
