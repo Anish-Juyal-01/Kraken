@@ -120,7 +120,10 @@ def _bids_closed(req, cfg, inp):
         return {}, [_ping(req, "no bids received")]
     if cfg.autonomy["pick"] == "human":
         accepts = [f"{_KEYCAPS[i]} {b['agent']}" for i, b in enumerate(req.bids[:len(_KEYCAPS)])]
-        return _ask(req, "pick", "Bids are in. Pick one.", accepts)
+        upd, posts = _ask(req, "pick", "Bids are in. Pick one.", accepts)
+        if len(req.bids) > len(_KEYCAPS):
+            posts = [_post(posts[0].text + "\n…or reply pick <name>")]
+        return upd, posts
     agents = [b["agent"] for b in req.bids]
     winner = _sig(inp).get("judged_winner")
     return _to_forge(req, winner if winner in agents else agents[0])

@@ -3,7 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-Kind = Literal["approve", "reject", "pick", "storm", "not_conflict", "retry"]
+Kind = Literal["approve", "reject", "pick", "storm", "not_conflict", "retry",
+               "crew", "enlist", "retire"]
 
 
 class Command(BaseModel):
@@ -11,6 +12,7 @@ class Command(BaseModel):
     arg: str | None = None
     tag: int | None = None
     user: str
+    role: str | None = None
 
 
 _EMOJI: dict[str, tuple[Kind, str | None]] = {
@@ -39,6 +41,10 @@ _NOT_CONFLICT = re.compile(r"not\s+a\s+conflict\s*[.!]?", _F)
 _REJECT = re.compile(r"reject(?:\s+(.*))?", _F | re.DOTALL)
 _PICK = re.compile(r"pick\s+([\w.-]+?)\s*[.!]?", _F)
 _STORM = re.compile(r"storm\s+(auto|drill|skip)\s*[.!]?", _F)
+_CREW = re.compile(r"crew\s*[.!]?", _F)
+_ENLIST = re.compile(
+    r"enlist\s+([\w.-]+?)(?:\s+as\s+(bidder|planner|attacker|defender|coach))?\s*[.!]?", _F)
+_RETIRE = re.compile(r"retire\s+([\w.-]+?)\s*[.!]?", _F)
 
 
 def _normalize(emoji: str) -> str:
@@ -79,6 +85,15 @@ def parse(body: str, user: str) -> Command | None:
     m = _STORM.fullmatch(text)
     if m:
         return Command(kind="storm", arg=m.group(1).lower(), tag=tag, user=user)
+    if _CREW.fullmatch(text):
+        return Command(kind="crew", tag=tag, user=user)
+    m = _ENLIST.fullmatch(text)
+    if m:
+        role = m.group(2).lower() if m.group(2) else None
+        return Command(kind="enlist", arg=m.group(1), role=role, tag=tag, user=user)
+    m = _RETIRE.fullmatch(text)
+    if m:
+        return Command(kind="retire", arg=m.group(1), tag=tag, user=user)
     if _NOT_CONFLICT.fullmatch(text):
         return Command(kind="not_conflict", tag=tag, user=user)
     if _RETRY.fullmatch(text):

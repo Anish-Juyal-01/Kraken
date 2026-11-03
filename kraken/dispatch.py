@@ -10,6 +10,7 @@ from kraken.conductor.commands import Command, from_reaction, parse, prompt
 from kraken.conductor.runner import ActionRunner, merge_data
 from kraken.conductor.state import Action, Signal, stage_room, step
 from kraken.config import Config
+from kraken.crew import lookup, render_roster
 from kraken.hallmark.ledger import Ledger, Request
 from kraken.hallmark.publish import publish
 from kraken.llm import LLM, SMART, LLMParseError
@@ -27,6 +28,7 @@ _TIMED_STAGES = ("SPARK", "CHARTER", "FORGE", "STORM")
 _MENTION = re.compile(r"^@kraken\b[:,]?\s*", re.IGNORECASE)
 _RESOLVE_HINT = "reply 1️⃣, 2️⃣ or 🙅"
 _QUOTE_MAX = 300
+_CREW_KINDS = ("crew", "enlist", "retire")
 
 
 class BidPick(BaseModel):
@@ -56,10 +58,12 @@ class Dispatcher:
         self.room_ids: dict[str, str] = {}
         self._room_names: dict[str, str] = {}  # room id -> name, from list_rooms
         self.runner = ActionRunner(client, ledger, cfg, lambda: self.on_decision())
+        self.crew = self.runner.crew
         self._lock = asyncio.Lock()
-        a = cfg.agents
-        self._agent_names = {cfg.kraken_agent, *cfg.bidders, a.planner, a.attacker, a.defender,
-                             a.coach}
+
+    @property
+    def _agent_names(self) -> set[str]:
+        return {self.cfg.kraken_agent, *self.crew.all_names()}
 
     async def on_decision(self) -> None:
         """A decision was recorded or a publish was requested: refresh the Hallmark document."""
@@ -160,6 +164,12 @@ class Dispatcher:
         name = p.get("sender_name") or p.get("sender") or ""
         known_agent = name in self._agent_names
         cmd = None if known_agent else parse(body, user=name)
+        if cmd is not None and cmd.kind in _CREW_KINDS:
+            if ev.room_id != self.room_ids.get(self.cfg.rooms.requests):
+                cmd = None  # crew commands only work in the requests room
+            else:
+                await self._crew_command(cmd, ev.room_id)
+                return
         if cmd is not None and await self._command(cmd, ev.room_id):
             return
         if await self._markers(ev, name, body):
@@ -178,6 +188,31 @@ class Dispatcher:
                                       storm_mode=self.cfg.storm.default_mode)
         await self.runner.run(self.ledger.get_request(rid),
                               [Action(kind="open_stage", stage="spark")])
+
+    # ---- crew commands --------------------------------------------------
+    async def _crew_command(self, cmd: Command, room_id: str) -> None:
+        try:
+            if cmd.kind == "enlist":
+                text = await self._enlist(cmd.arg or "", cmd.role or "bidder")
+            elif cmd.kind == "retire":
+                name = cmd.arg or ""
+                text = f"{name} retired." if self.crew.retire(name) else f"{name} isn't on the crew."
+            else:
+                roster = self.crew.roster()
+                infos = await lookup(self.client, [n for names in roster.values() for n in names])
+                text = render_roster(roster, infos)
+        except SwitchError as err:
+            text = f"could not reach Switch: {err.detail}"
+        await self.client.send(room_id, text)
+
+    async def _enlist(self, name: str, role: str) -> str:
+        if name == self.cfg.kraken_agent:
+            return "Kraken runs the crew; it can't join it."
+        if not any(a.get("name") == name for a in await self.client.op("list_agents")):
+            return f"No Switch agent named {name}."
+        if self.crew.enlist(name, role):
+            return f"{name} enlisted as {role}."
+        return f"{name} is already a {role}."
 
     # ---- commands -----------------------------------------------------
     async def _command(self, cmd: Command, room_id: str | None) -> bool:
@@ -282,7 +317,7 @@ class Dispatcher:
         stage = next((s for s, r in req.rooms.items() if r == ev.room_id), None)
         lines = [ln.strip() for ln in body.splitlines()]
         live = req.data.get("live_bidders") or [b["agent"] for b in req.bids]
-        if stage == "spark" and sender == self.cfg.agents.planner and "BRIEF READY" in lines:
+        if stage == "spark" and sender == self.crew.primary("planner") and "BRIEF READY" in lines:
             await self._brief_ready(req)
         elif (stage == "charter" and req.state == "CHARTER" and sender in live
               and any(ln.startswith("BID:") for ln in lines)):
@@ -296,7 +331,7 @@ class Dispatcher:
         elif (stage == "forge" and sender in live and sender != req.winner
               and "ACCEPTED" in lines):
             await self.apply(rid, Signal(kind="accepted"))
-        elif stage == "storm" and sender == self.cfg.agents.coach and (
+        elif stage == "storm" and sender == self.crew.primary("coach") and (
                 "SURVIVED" in lines or "FAILED" in lines):
             if "SURVIVED" in lines:
                 await self.apply(rid, Signal(kind="survived"))

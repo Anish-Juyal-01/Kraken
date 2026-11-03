@@ -101,3 +101,25 @@ def test_extra_overrides_and_resolution_passthrough():
 def test_unknown_stage_inputs():
     with pytest.raises(StageError):
         stage_inputs("nope", req(), Config())
+
+
+def test_inputs_read_single_seat_roles_from_the_crew(ledger):
+    from kraken.crew import Crew
+    crew = Crew(ledger)
+    crew.seed(Config(bidders=["b1", "b2"]))
+    crew.enlist("p2", "planner")
+    crew.retire("kraken-planner")
+    assert stage_inputs("spark", req(), Config(), crew)["planner"] == "p2"
+    assert stage_inputs("charter", req(), Config(), crew)["other_bidders"] == "b2"
+    got = stage_inputs("storm", req(), Config(), crew)
+    assert (got["attacker"], got["defender"], got["coach"]) == (
+        "squall", "storm-defender", "storm-coach")
+
+
+def test_inputs_fail_when_the_crew_has_no_one_for_a_role(ledger):
+    from kraken.crew import Crew
+    crew = Crew(ledger)
+    crew.seed(Config())
+    crew.retire("storm-coach")
+    with pytest.raises(StageError, match="no coach on the crew"):
+        stage_inputs("storm", req(), Config(), crew)

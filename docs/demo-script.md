@@ -11,7 +11,7 @@ Messages come from `demo/seed_chat.md`.
 | 0:35-0:50 | Seed `#mobile` | Post only: `The mobile app stores user_id as an int in the local database.` (skip the second `#mobile` line in `seed_chat.md`; it would raise a second, duplicate room) | Message in `#mobile` |
 | 0:50-1:10 | Conflict caught | "Nobody asked Kraken. It noticed." | A new Sonar resolution room appears with you and Kraken in it. Its text names both speakers and quotes both messages with their channels (`#backend`, `#mobile`), then asks "Which one is true?" |
 | 1:10-1:25 | Resolve | React 1️⃣ on the prompt (relay), or reply `1️⃣` in the thread | Receipt line in the thread; the decision is recorded and becomes the brief |
-| 1:25-1:50 | Charter bids | "Three agents from different vendors bid in one room." | Charter room with `BID:` posts from claude-coder, codex-coder and opencode-coder |
+| 1:25-1:50 | Charter bids | "Three agents from different vendors bid in one room." | Charter room with `BID:` posts from each bidder (enlist Codex / Gemini / Kimi agents beforehand for the cross-vendor shot; `@kraken crew` shows the vendors) |
 | 1:50-2:00 | Pick | React 1️⃣ on the `[K-n]` pick prompt | Winner announced; Forge room opens with the losers invited as reviewers |
 | 2:00-2:15 | Forge | "Reviewers push back until the acceptance criteria pass." | Reviewer posts, then `ACCEPTED` on its own line; react 👍 to approve the merge |
 | 2:15-2:40 | Storm | Storm opens in auto mode (the default, `storm.default_mode`); nothing to pick. "Squall picks faults aimed at the change; the defender patches." | Squall runs faults against shopfront (kill, latency, bad payload and so on); defender diagnoses; coach scorecard ending `SURVIVED`; react 👍 |

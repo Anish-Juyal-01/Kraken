@@ -83,3 +83,31 @@ def test_from_reaction():
 
 def test_prompt_format():
     assert prompt(12, "Brief ready.", ["👍 approve", "👎 reject"]) == "[K-12] Brief ready.\n👍 approve · 👎 reject"
+
+
+def test_crew_command():
+    c = parse("crew", "u")
+    assert (c.kind, c.arg, c.role) == ("crew", None, None)
+    assert parse("@Kraken: CREW!", "u").kind == "crew"
+    assert parse("[K-3] crew", "u").kind == "crew"
+
+
+def test_enlist_defaults_to_bidder_and_takes_role():
+    c = parse("enlist kimi-coder", "u")
+    assert (c.kind, c.arg, c.role) == ("enlist", "kimi-coder", None)
+    c = parse("@kraken enlist Qwen.Coder as Coach.", "u")
+    assert (c.kind, c.arg, c.role) == ("enlist", "Qwen.Coder", "coach")
+    for role in ("bidder", "planner", "attacker", "defender", "coach"):
+        assert parse(f"enlist x as {role}", "u").role == role
+
+
+def test_retire_command():
+    c = parse("@kraken retire kimi-coder", "u")
+    assert (c.kind, c.arg) == ("retire", "kimi-coder")
+    assert parse("RETIRE kimi-coder!", "u").arg == "kimi-coder"
+
+
+def test_crew_false_positives():
+    for b in ["enlist me in the army please", "crew is ready", "enlist", "retire",
+              "enlist bob as wizard", "retire bob soon", "enlist a b", "the crew"]:
+        assert parse(b, "u") is None, b

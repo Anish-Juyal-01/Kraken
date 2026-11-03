@@ -5,12 +5,12 @@ from collections.abc import Awaitable, Callable
 from kraken.conductor.stages import StageError, open_stage, stage_inputs
 from kraken.conductor.state import Action, stage_room
 from kraken.config import Config
+from kraken.crew import Crew, lookup, pick_bidders
 from kraken.hallmark.ledger import Ledger, Request
 from kraken.switch_client import SwitchClient, SwitchError
 
 log = logging.getLogger(__name__)
 
-_LIVE_STATES = ("live", "open")
 # An invite adds a member without waking it, and the kickoff predates membership:
 # invited agents get a mention so they start work.
 _WAKE = {
@@ -39,23 +39,26 @@ class ActionRunner:
         self.ledger = ledger
         self.cfg = cfg
         self._publish = publish
+        self.crew = Crew(ledger)
 
     async def live_bidders(self) -> tuple[list[str], list[str]]:
-        """(live, missing) subsets of cfg.bidders. An agent is live when
-        get_agent_detail reports a session in state live/open (list_agents has no
-        liveness field)."""
+        """(live, missing) from the crew's bidders. An agent is live when Switch reports
+        a session for it in state live/open. When more are live than charter.max_bidders
+        allows, pick_bidders seats a vendor-diverse subset, rotating each Charter."""
+        members = self.crew.members("bidder")
         try:
-            by_name = {a["name"]: a["id"] for a in await self.client.op("list_agents")}
-            live: list[str] = []
-            for name in self.cfg.bidders:
-                if name not in by_name:
-                    continue
-                detail = await self.client.op("get_agent_detail", agent_id=by_name[name])
-                if any(s.get("state") in _LIVE_STATES for s in detail.get("sessions", [])):
-                    live.append(name)
+            infos = await lookup(self.client, members)
         except SwitchError as err:
             raise StageError("charter", f"could not list agents: {err.detail}") from err
-        return live, [b for b in self.cfg.bidders if b not in live]
+        online = [infos[n] for n in members if n in infos and infos[n].online]
+        missing = [n for n in members if n not in infos or not infos[n].online]
+        live = [i.name for i in online]
+        if online:
+            rotation = self.crew.next_rotation()
+            if len(online) > self.cfg.charter.max_bidders:
+                live = pick_bidders([(i.name, i.vendor) for i in online],
+                                    self.cfg.charter.max_bidders, rotation)
+        return live, missing
 
     async def say(self, req: Request, text: str, stage: str | None = None) -> None:
         """Post to the stage room (when bound) or else the origin room."""
@@ -117,7 +120,8 @@ class ActionRunner:
             reviewers = [x for x in pool if x != req.winner]
             extra["reviewers"], invitees = reviewers, reviewers[1:]
         await self._connect_parent(req)
-        room_id = await open_stage(self.client, stage, stage_inputs(stage, req, self.cfg, **extra))
+        inputs = stage_inputs(stage, req, self.cfg, self.crew, **extra)
+        room_id = await open_stage(self.client, stage, inputs)
         self.ledger.bind_room(req.id, stage, room_id)
         merge_data(self.ledger, req.id, stage_started=time.time(), timed_out=None)
         invited: list[str] = []

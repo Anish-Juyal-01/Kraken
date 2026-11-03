@@ -13,7 +13,9 @@ autonomy:
 rooms:
   requests: kraken-requests
   hallmark: kraken-hallmark
-bidders: [claude-coder, codex-coder, opencode-coder]
+charter:
+  max_bidders: 5
+bidders: [claude-coder, claude-coder-2, claude-coder-3]
 timeouts_s:
   spark: 1800
   charter: 900

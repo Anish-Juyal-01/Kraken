@@ -29,6 +29,10 @@ class AgentsConfig(BaseModel):
     coach: str = "storm-coach"
 
 
+class CharterConfig(BaseModel):
+    max_bidders: int = Field(default=5, ge=1)
+
+
 AUTONOMY_KEYS = ("brief", "pick", "merge", "storm_result")
 
 
@@ -45,6 +49,7 @@ class Config(BaseModel):
     storm: StormConfig = Field(default_factory=StormConfig)
     autonomy: dict[str, AutonomyValue] = Field(default_factory=_default_autonomy)
     rooms: RoomsConfig = Field(default_factory=RoomsConfig)
+    charter: CharterConfig = Field(default_factory=CharterConfig)
     bidders: list[str] = Field(default_factory=list)
     kraken_agent: str = "kraken"
     agents: AgentsConfig = Field(default_factory=AgentsConfig)

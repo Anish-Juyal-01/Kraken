@@ -288,3 +288,20 @@ def test_charter_auto_pick_unknown_judged_winner_falls_back():
     upd, acts = step(r, cfg_with(autonomy=ALL_AUTO),
                      Signal(kind="bids_done", data={"judged_winner": "ghost"}))
     assert upd["winner"] == "a" and upd["state"] == "FORGE"
+
+
+def test_charter_prompt_beyond_nine_bids_offers_pick_by_name():
+    bids = [{"agent": f"a{i}"} for i in range(1, 11)]
+    upd, acts = step(req(state="CHARTER", bids=bids), Config(), Signal(kind="bids_done"))
+    lines = acts[0].text.splitlines()
+    assert lines[-1] == "…or reply pick <name>"
+    assert "9️⃣ a9" in lines[1] and "a10" not in lines[1]
+    r = dataclasses.replace(req(state="CHARTER", bids=bids), data=upd["data"])
+    upd2, _ = step(r, Config(), cmd("pick", "a10"))
+    assert upd2["winner"] == "a10"
+
+
+def test_charter_prompt_with_nine_bids_has_no_extra_line():
+    bids = [{"agent": f"a{i}"} for i in range(1, 10)]
+    _, acts = step(req(state="CHARTER", bids=bids), Config(), Signal(kind="bids_done"))
+    assert "pick <name>" not in acts[0].text

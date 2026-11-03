@@ -5,6 +5,7 @@ import pytest
 
 from kraken.conductor.state import Action, Signal
 from kraken.config import Config
+from kraken.crew import Crew
 from kraken.dispatch import Dispatcher
 from kraken.llm import LLMParseError
 from kraken.models import Claim, Event
@@ -19,10 +20,11 @@ REQ_ROOM = "req-room"
 class MockClient:
     agent_id = "kraken-id"
 
-    def __init__(self, offline=(), fail_create=None, documents=None):
+    def __init__(self, offline=(), fail_create=None, documents=None, agents=None):
         self.ops: dict[str, list[dict]] = {}
         self.sent: list[tuple[str, str]] = []
         self.offline = set(offline)
+        self.agents = agents  # name -> get_agent_detail reply; None means just BIDDERS
         self.fail_create = fail_create
         self.documents = documents if documents is not None else []
         self.n = 0
@@ -36,6 +38,10 @@ class MockClient:
                 raise self.fail_create
             self.n += 1
             return {"room_id": f"room-{self.n}"}
+        if name == "list_agents" and self.agents is not None:
+            return [{"id": f"id-{n}", "name": n} for n in self.agents]
+        if name == "get_agent_detail" and self.agents is not None:
+            return self.agents[args["agent_id"].removeprefix("id-")]
         if name == "list_agents":
             return [{"id": f"id-{b}", "name": b} for b in BIDDERS if b not in self.offline_listed()]
         if name == "get_agent_detail":
@@ -77,6 +83,7 @@ def make(ledger, client=None, llm=None, **cfg):
     d = Dispatcher(client, llm or FakeLLM([]), ledger, Config(bidders=BIDDERS, **cfg), [],
                    self_id="kraken-id")
     d.room_ids = {"kraken-requests": REQ_ROOM}
+    Crew(ledger).seed(d.cfg)
     return client, d
 
 

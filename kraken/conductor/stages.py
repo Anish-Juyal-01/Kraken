@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from kraken.config import Config
+from kraken.crew import Crew, Role
 from kraken.hallmark.ledger import Request
 from kraken.switch_client import SwitchClient, SwitchError
 
@@ -34,15 +35,25 @@ def _split(stage: str, names: list[str], what: str) -> dict:
             "mentions": " ".join(f"@{n}" for n in names[1:])}
 
 
-def stage_inputs(stage: str, req: Request, cfg: Config, **extra) -> dict:
+def _agent(stage: str, role: Role, cfg: Config, crew: Crew | None) -> str:
+    """The agent for a single-seat role: the crew's first member (config when there is no crew)."""
+    name = crew.primary(role) if crew is not None else getattr(cfg.agents, role)
+    if not name:
+        raise StageError(stage, f"no {role} on the crew")
+    return name
+
+
+def stage_inputs(stage: str, req: Request, cfg: Config, crew: Crew | None = None, **extra) -> dict:
     tag = str(req.id)
     base = {"tag": tag, "kraken": cfg.kraken_agent}
     if stage == "spark":
-        inputs = {**base, "request": req.text, "planner": cfg.agents.planner, "owner": req.owner}
+        inputs = {**base, "request": req.text, "planner": _agent(stage, "planner", cfg, crew),
+                  "owner": req.owner}
     elif stage == "sonar-resolution":
         inputs = base
     elif stage == "charter":
-        parts = _split(stage, list(extra.pop("bidders", cfg.bidders)), "bidders")
+        default = crew.members("bidder") if crew is not None else cfg.bidders
+        parts = _split(stage, list(extra.pop("bidders", default)), "bidders")
         inputs = {**base, "brief": req.brief or "", "bidder_1": parts["first"],
                   "other_bidders": parts["rest"], "other_mentions": parts["mentions"]}
     elif stage == "forge":
@@ -54,8 +65,9 @@ def stage_inputs(stage: str, req: Request, cfg: Config, **extra) -> dict:
                   "other_reviewer_mentions": parts["mentions"]}
     elif stage == "storm":
         inputs = {**base, "brief": req.brief or "", "diff_ref": f"branch kraken/K-{req.id}",
-                  "mode": req.storm_mode, "attacker": cfg.agents.attacker,
-                  "defender": cfg.agents.defender, "coach": cfg.agents.coach}
+                  "mode": req.storm_mode, "attacker": _agent(stage, "attacker", cfg, crew),
+                  "defender": _agent(stage, "defender", cfg, crew),
+                  "coach": _agent(stage, "coach", cfg, crew)}
     else:
         raise StageError(stage, "unknown stage")
     return {**inputs, **extra}

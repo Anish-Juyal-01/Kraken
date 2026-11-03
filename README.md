@@ -56,9 +56,9 @@ Requirements: Python 3.12 or newer, Switch Console (with Docker for the local Sw
    python scripts/register.py
    ```
    It reads `.env` and prints `SWITCH_AGENT_ID=...` and `SWITCH_API_KEY=...`; paste both into `.env`. If registration is rejected, the script prints Switch's error.
-4. **Create the stage agents in Switch Console.** Create `kraken-planner`, three coders matching `bidders` in `kraken.yaml` (default `claude-coder`, `codex-coder`, `opencode-coder`), `squall`, `storm-defender` and `storm-coach`. See the Switch docs for agent templates. Set `addressing: anyone` on each so Kraken's kickoff messages wake them. Names must match `bidders` and `agents` in `kraken.yaml`. Give `squall` (the Storm attacker) the Kraken checkout as its working directory: it injects faults with `python -m storm.faults`, which only runs from there.
+4. **Create the crew in one click.** In Switch Console's Templates page, run `templates/kraken-crew.template.yaml`. It creates `kraken-planner`, three bidders (`claude-coder`, `claude-coder-2`, `claude-coder-3`), `squall`, `storm-defender` and `storm-coach`, each on the first installed coding agent, with `addressing: anyone` (Kraken wakes them by @-mention), auto mode, and its own clone of this repo (the `repo` param). The names match `bidders` and `agents` in `kraken.yaml`, which seed the crew the first time Kraken starts. To bring in other vendors (Codex, Gemini, Kimi, Qwen), create those agents in Switch Console and `@kraken enlist` them (see [Crew](#crew)).
 5. **Create the HQ rooms.** In Switch Console, create the rooms from `templates/kraken-hq.template.yaml`. That makes `#kraken-requests` and `#kraken-hallmark` with Kraken in both.
-6. **Add Kraken to the channels it should watch.** For the demo: `#backend`, `#mobile`, `#product`, `#partners`.
+6. **Create the demo channels.** Register the smoke-test agent first (`python scripts/register.py --name kraken-smoke`, see step 10), then run `templates/kraken-demo.template.yaml` in Switch Console. It creates `#backend`, `#mobile`, `#product` and `#partners` with Kraken and `kraken-smoke` in each. For your own team, add Kraken to whichever channels it should watch instead.
 7. **Start shopfront** (the demo app Storm attacks) with chaos controls on:
    ```bash
    SHOPFRONT_CHAOS=1 python demo/shopfront/run.py      # API on :8080, email stub on :8081
@@ -113,8 +113,44 @@ Ask for work in `#kraken-requests`: `@kraken build password reset`. Every prompt
 | `storm skip` | ⏭️ | Skip Storm |
 | `not a conflict` | 🙅 | Dismiss a Sonar conflict; the pair is remembered |
 | `retry` | none | Retry a stage whose template run failed |
+| `crew` | none | List the roster with each agent's vendor and whether it is online (requests room only) |
+| `enlist <name> [as <role>]` | none | Add a Switch agent to the crew; role defaults to `bidder` (requests room only) |
+| `retire <name>` | none | Remove an agent from the crew (requests room only) |
 
 A leading `@kraken` and a trailing `.` or `!` are ignored.
+
+## Crew
+
+The crew is Kraken's roster of agents: the Charter bidders and the single-seat roles (`planner`, `attacker`, `defender`, `coach`). It lives in Kraken's database, not in `kraken.yaml`, and people manage it from `#kraken-requests`:
+
+```
+@kraken crew
+@kraken enlist kimi-coder
+@kraken enlist qwen-coder as bidder
+@kraken retire opencode-coder
+```
+
+- `crew` prints one line per role. Each agent shows its vendor and whether it is online (`●`) or offline (`○`), e.g. `bidder: claude-coder (claude-code) ● · kimi-coder (opencode · moonshot/kimi-k2) ○`. Vendor and liveness come from Switch (`known_agent_type`, the agent's first listed model, and its sessions).
+- `enlist <name>` checks that Switch has an agent with that exact name. An agent holds one role, so enlisting it under a new role moves it. Roles: `bidder`, `planner`, `attacker`, `defender`, `coach`.
+- `retire <name>` takes the agent off the crew.
+- The commands work only in the requests room (`rooms.requests`), and messages from crew agents are ignored, so agents cannot reshape the crew.
+- For the single-seat roles Kraken uses the first member listed.
+- `kraken.yaml`'s `bidders` and `agents` are only the initial seed: Kraken copies them into the database once, on first start. Editing them afterwards changes nothing; use the commands, or delete `kraken.db` (which also clears claims and requests) to reseed.
+- A request already past Charter keeps the bidders it chose. Roster changes apply from the next Charter.
+
+### Vendors
+
+| Vendor | Shown as | How it joins |
+|---|---|---|
+| Claude | `claude-code` | Claude Code agent |
+| GPT | `codex` | Codex agent |
+| Gemini | the agent's Switch type | Antigravity agent |
+| Kimi, Qwen, DeepSeek and others | `opencode · <model>` | OpenCode agent; the model name tells the vendors apart |
+| Anything else | `custom` | Any agent that speaks the Switch protocol |
+
+### Choosing bidders
+
+At Charter, Kraken asks the bidders that are online. If more than `charter.max_bidders` (default 5) are online it seats a subset, preferring different vendors. It takes one agent per vendor first, then fills any remaining seats in order. The scan start rotates by one at every Charter, so the same agents do not always win the seats. OpenCode agents count as different vendors when their first listed model differs. With more than nine bids the pick prompt adds `…or reply pick <name>`, since only nine keycaps exist.
 
 ## Configuration (`kraken.yaml`)
 
@@ -131,19 +167,20 @@ A leading `@kraken` and a trailing `.` or `!` are ignored.
 | `autonomy.storm_result` | `human` | Gate after the coach posts `SURVIVED` |
 | `rooms.requests` | `kraken-requests` | Name of the requests room |
 | `rooms.hallmark` | `kraken-hallmark` | Name of the Hallmark room |
-| `bidders` | `[]` (`[claude-coder, codex-coder, opencode-coder]` in the repo file) | Charter bidder agent names |
+| `charter.max_bidders` | `5` | Most bidders seated in one Charter (at least 1); vendor-diverse choice when more are online |
+| `bidders` | `[]` (`[claude-coder, claude-coder-2, claude-coder-3]` in the repo file) | Initial seed for the crew's bidders (see [Crew](#crew)) |
 | `kraken_agent` | `kraken` | Kraken's agent name |
-| `agents.planner` | `kraken-planner` | Spark planner agent |
-| `agents.attacker` | `squall` | Storm attacker |
-| `agents.defender` | `storm-defender` | Storm defender |
-| `agents.coach` | `storm-coach` | Storm coach |
+| `agents.planner` | `kraken-planner` | Initial seed for the planner |
+| `agents.attacker` | `squall` | Initial seed for the attacker |
+| `agents.defender` | `storm-defender` | Initial seed for the defender |
+| `agents.coach` | `storm-coach` | Initial seed for the coach |
 | `timeouts_s.spark` / `charter` / `forge` / `storm` | `1800` / `900` / `3600` / `1800` | Per-stage timeout in seconds; on expiry Kraken pings the owner |
 | `db_path` | `kraken.db` | SQLite file for claims, decisions and request state |
 | `relay_port` | `8765` | Local port for the reaction relay endpoint |
 
 ## Repo map
 
-- `kraken/` core service: `sonar/`, `hallmark/`, `conductor/`, `relay/`, `switch_client.py`, `main.py`
+- `kraken/` core service: `sonar/`, `hallmark/`, `conductor/`, `relay/`, `crew.py`, `switch_client.py`, `main.py`
 - `templates/` Switch room templates, one per stage plus `kraken-hq`
 - `storm/faults.py` fault toolkit (`python -m storm.faults kill|latency|bad_payload|flood|bad_config`)
 - `demo/shopfront/` the tiny two-service app with seeded drift; `demo/seed_chat.md` the demo messages

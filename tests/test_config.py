@@ -24,7 +24,7 @@ def test_empty_file_loads_defaults(tmp_path):
 def test_repo_config_parses():
     c = load_config("kraken.yaml")
     assert "demo/shopfront" in c.sonar.code_paths
-    assert c.bidders == ["claude-coder", "codex-coder", "opencode-coder"]
+    assert c.bidders == ["claude-coder", "claude-coder-2", "claude-coder-3"]
 
 
 def test_bad_autonomy_value_rejected(tmp_path):
@@ -63,3 +63,20 @@ def test_agent_defaults(tmp_path):
     assert c.kraken_agent == "kraken"
     assert (c.agents.planner, c.agents.attacker, c.agents.defender, c.agents.coach) == (
         "kraken-planner", "squall", "storm-defender", "storm-coach")
+
+
+def test_charter_max_bidders_default_and_repo(tmp_path):
+    p = tmp_path / "k.yaml"
+    p.write_text("{}")
+    assert load_config(str(p)).charter.max_bidders == 5
+    assert load_config("kraken.yaml").charter.max_bidders == 5
+
+
+def test_charter_max_bidders_override_and_validation(tmp_path):
+    p = tmp_path / "k.yaml"
+    p.write_text("charter: {max_bidders: 2}")
+    assert load_config(str(p)).charter.max_bidders == 2
+    for bad in ("0", "-1"):
+        p.write_text(f"charter: {{max_bidders: {bad}}}")
+        with pytest.raises(ValidationError):
+            load_config(str(p))

@@ -7,6 +7,7 @@ import uuid
 from aiohttp import web
 
 from kraken.config import load_config
+from kraken.crew import Crew
 from kraken.dispatch import Dispatcher
 from kraken.hallmark.ledger import Ledger
 from kraken.llm import ClaudeLLM
@@ -62,6 +63,7 @@ async def main() -> None:
     load_env()
     cfg = load_config()
     ledger = Ledger(cfg.db_path)
+    Crew(ledger).seed(cfg)  # kraken.yaml's agent lists only seed the roster, once
     client = SwitchClient(os.environ["SWITCH_URL"], os.environ["SWITCH_AGENT_ID"],
                           os.environ["SWITCH_API_KEY"], connection_id(ledger))
     code_index = index_code(cfg.sonar.code_paths)

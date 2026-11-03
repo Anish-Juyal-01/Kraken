@@ -1,0 +1,53 @@
+# Kraken demo channels: the four team channels the demo script posts into,
+# with Kraken (and the smoke-test agent) watching each. Create once from
+# Switch Console; Sonar listens in all of them.
+version: 1
+params:
+  kraken:
+    type: agent
+    label: Kraken agent
+    default: kraken
+  smoke:
+    type: agent
+    label: Smoke-test agent (register it first with scripts/register.py --name kraken-smoke)
+    default: kraken-smoke
+group:
+  name: Kraken demo
+  description: Team channels where Sonar catches contradicting decisions.
+rooms:
+  - name: backend
+    description: Backend team channel.
+    channel_type: channel_public
+    agents: ["{kraken}", "{smoke}"]
+    users: ["{$creator}"]
+    instructions: |
+      The backend team's channel. Kraken's Sonar reads decisions stated here.
+    kickoff: |
+      Backend channel ready. Kraken is listening for decisions.
+  - name: mobile
+    description: Mobile team channel.
+    channel_type: channel_public
+    agents: ["{kraken}", "{smoke}"]
+    users: ["{$creator}"]
+    instructions: |
+      The mobile team's channel. Kraken's Sonar reads decisions stated here.
+    kickoff: |
+      Mobile channel ready. Kraken is listening for decisions.
+  - name: product
+    description: Product team channel.
+    channel_type: channel_public
+    agents: ["{kraken}", "{smoke}"]
+    users: ["{$creator}"]
+    instructions: |
+      The product team's channel. Kraken's Sonar reads decisions stated here.
+    kickoff: |
+      Product channel ready. Kraken is listening for decisions.
+  - name: partners
+    description: Partner relations channel.
+    channel_type: channel_public
+    agents: ["{kraken}", "{smoke}"]
+    users: ["{$creator}"]
+    instructions: |
+      The partner team's channel. Kraken's Sonar reads decisions stated here.
+    kickoff: |
+      Partners channel ready. Kraken is listening for decisions.
