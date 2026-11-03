@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kraken"
+version = "0.1.0"
+description = "Kraken: a Switch agent that joins team chat"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx",
+    "pydantic>=2",
+    "pyyaml",
+    "anthropic",
+    "discord.py",
+    "aiohttp",
+    "fastapi",
+    "uvicorn",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "respx"]
+
+[tool.setuptools.packages.find]
+include = ["kraken*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

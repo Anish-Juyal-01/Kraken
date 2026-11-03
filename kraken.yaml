@@ -1,0 +1,23 @@
+sonar:
+  threshold: 0.75
+  code_paths: [demo/shopfront]
+  min_words: 6
+storm:
+  max_rounds: 3
+  default_mode: auto
+autonomy:
+  brief: human
+  pick: human
+  merge: human
+  storm_result: human
+rooms:
+  requests: kraken-requests
+  hallmark: kraken-hallmark
+bidders: [claude-coder, codex-coder, opencode-coder]
+timeouts_s:
+  spark: 1800
+  charter: 900
+  forge: 3600
+  storm: 1800
+db_path: kraken.db
+relay_port: 8765
