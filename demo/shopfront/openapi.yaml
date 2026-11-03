@@ -1,0 +1,56 @@
+openapi: 3.0.3
+info:
+  title: Shopfront API
+  version: "2.0"
+paths:
+  /v1/users/{user_id}:
+    get:
+      summary: Fetch a user (v1)
+      deprecated: true
+      x-sunset: "2027-03-31"
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: The user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+  /v2/users/{user_id}:
+    get:
+      summary: Fetch a user (v2)
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: The user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+  /auth/reset:
+    post:
+      summary: Send a password reset email
+      responses:
+        "200":
+          description: Reset email sent
+        "502":
+          description: Email service unavailable
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        user_id:
+          type: integer
+        name:
+          type: string
