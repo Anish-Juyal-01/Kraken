@@ -153,6 +153,10 @@ class Ledger:
         return Request(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7],
                        json.loads(r[8]), r[9], json.loads(r[10]), json.loads(r[11]))
 
+    def open_requests(self) -> list[Request]:
+        ids = [r[0] for r in self._all("SELECT id FROM requests WHERE state != 'CLOSED' ORDER BY id")]
+        return [self.get_request(i) for i in ids]
+
     def update_request(self, rid: int, **fields) -> None:
         unknown = set(fields) - _UPDATABLE
         if unknown:

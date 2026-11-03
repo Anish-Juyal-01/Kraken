@@ -173,7 +173,7 @@ class SwitchClient:
                 pass
             await asyncio.sleep(interval)
 
-    async def op(self, name: str, **args: Any) -> Any:
+    async def op(self, name: str, /, **args: Any) -> Any:
         resp = await self.http.post(
             self._url(f"ops/{name}"),
             json=args,

@@ -91,7 +91,8 @@ def test_spark_params():
 
 def test_resolution_room():
     doc = load("sonar-resolution")
-    assert doc["room"]["users"] == ["{user_a}", "{user_b}", "{$creator}"]
+    assert doc["room"]["users"] == ["{$creator}"]
+    assert doc["params"]["user_a"]["type"] == "string" and doc["params"]["user_b"]["type"] == "string"
     assert doc["kickoff"] == "{prompt_text}"
     assert {"tag", "subject", "quote_a", "link_a", "user_a", "quote_b", "link_b", "user_b",
             "prompt_text"} <= set(doc["params"])

@@ -91,3 +91,10 @@ def test_meta_and_last_sequence_roundtrip(tmp_path):
     L.set_meta("x", "y")
     L2 = Ledger(str(tmp_path / "k.db"))
     assert L2.last_sequence() == 42 and L2.get_meta("x") == "y"
+
+
+def test_open_requests_excludes_closed(ledger):
+    a = ledger.new_request("sam", "a", "r")
+    b = ledger.new_request("sam", "b", "r")
+    ledger.update_request(a, state="CLOSED")
+    assert [r.id for r in ledger.open_requests()] == [b]

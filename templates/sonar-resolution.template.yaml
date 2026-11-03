@@ -12,7 +12,8 @@ params:
   link_a:
     type: string
   user_a:
-    type: user
+    type: string
+    required: false
     label: First speaker
   quote_b:
     type: string
@@ -20,7 +21,8 @@ params:
   link_b:
     type: string
   user_b:
-    type: user
+    type: string
+    required: false
     label: Second speaker
   prompt_text:
     type: string
@@ -36,7 +38,7 @@ room:
   description: "Two messages disagree about {subject}. Pick the one that is true."
   channel_type: channel_private
   agents: ["{kraken}"]
-  users: ["{user_a}", "{user_b}", "{$creator}"]
+  users: ["{$creator}"]
   instructions: |
     Sonar found two messages that cannot both be true, about {subject} [K-{tag}].
 
