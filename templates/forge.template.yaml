@@ -1,0 +1,60 @@
+version: 1
+params:
+  tag:
+    type: string
+    label: Request tag
+  brief:
+    type: string
+    multiline: true
+    label: Brief
+  coder:
+    type: agent
+    label: Coder
+  reviewer_1:
+    type: agent
+    label: First reviewer
+  other_reviewers:
+    type: string
+    required: false
+    label: Other reviewers
+    description: Comma-separated names of further reviewers. Kraken adds them to the room after it is created.
+  other_reviewer_mentions:
+    type: string
+    required: false
+    label: Other reviewers as mentions
+    description: The same names written as @mentions, for the kickoff.
+  kraken:
+    type: agent
+    label: Kraken agent
+    default: kraken
+room:
+  name: "Forge [K-{tag}]"
+  description: "{coder} builds request K-{tag}; reviewers check it against the brief."
+  channel_type: channel_private
+  agents: ["{coder}", "{reviewer_1}", "{kraken}"]
+  users: ["{$creator}"]
+  instructions: |
+    This room builds request [K-{tag}]. {coder} owns the branch kraken/K-{tag}
+    and makes the commits. The reviewers are {reviewer_1} and, when present,
+    {other_reviewers}.
+
+    Brief:
+    {brief}
+
+    Coder: post your plan in this room before your first commit, then implement
+    on the branch and post a short hand-off after each push.
+
+    Reviewers: check every hand-off against the acceptance criteria in the
+    brief and push back until all are met. Only when every acceptance criterion
+    is met, end your message with the line ACCEPTED.
+
+    Marker rule: ACCEPTED goes on its own line, and only when every acceptance
+    criterion is met. Never write it in a message that still lists open items.
+kickoff: |
+  @{coder} {other_reviewer_mentions} @{reviewer_1} building request [K-{tag}].
+
+  @{coder}: read the brief in the room instructions and post your plan before
+  your first commit.
+
+  @{reviewer_1}: review each hand-off against the acceptance criteria and push
+  back until all are met.

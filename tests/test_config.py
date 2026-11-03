@@ -54,3 +54,12 @@ def test_non_mapping_top_level_rejected(tmp_path):
     p.write_text("- a\n- b")
     with pytest.raises(ValidationError):
         load_config(str(p))
+
+
+def test_agent_defaults(tmp_path):
+    p = tmp_path / "k.yaml"
+    p.write_text("{}")
+    c = load_config(str(p))
+    assert c.kraken_agent == "kraken"
+    assert (c.agents.planner, c.agents.attacker, c.agents.defender, c.agents.coach) == (
+        "kraken-planner", "squall", "storm-defender", "storm-coach")

@@ -1,0 +1,50 @@
+version: 1
+params:
+  tag:
+    type: string
+    label: Request tag
+    description: Request number, used in the room name and in prompts.
+  request:
+    type: string
+    multiline: true
+    label: Request
+  planner:
+    type: agent
+    label: Planner agent
+    default: kraken-planner
+  owner:
+    type: string
+    label: Request owner
+  kraken:
+    type: agent
+    label: Kraken agent
+    default: kraken
+room:
+  name: "Spark [K-{tag}]"
+  description: "Turns request K-{tag} into a brief."
+  channel_type: channel_private
+  agents: ["{planner}", "{kraken}"]
+  users: ["{$creator}"]
+  instructions: |
+    This room turns request [K-{tag}] from {owner} into a brief that coders can bid on.
+
+    Request:
+    {request}
+
+    {planner} is the planner. Work in this order:
+    1. Ask at most 3 clarifying questions, all in one message. If the request is
+       already clear, ask none.
+    2. When the answers are in, write the brief: goal, acceptance criteria (a
+       numbered list a reviewer can tick off), files likely touched, and out of scope.
+    3. Create the brief as a room document named brief (create_room_document), so
+       the full text lives in the room.
+    4. Then post one message containing the marker line BRIEF READY.
+
+    Marker rule: BRIEF READY goes on its own line, with nothing else on that line,
+    and only once the document brief exists. Never write it earlier or in a question.
+kickoff: |
+  @{planner} new request [K-{tag}] from {owner}:
+
+  {request}
+
+  Start with your clarifying questions (at most 3, in one message).

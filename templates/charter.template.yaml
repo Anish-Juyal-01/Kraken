@@ -1,0 +1,55 @@
+version: 1
+params:
+  tag:
+    type: string
+    label: Request tag
+  brief:
+    type: string
+    multiline: true
+    label: Brief
+  bidder_1:
+    type: agent
+    label: First bidder
+  other_bidders:
+    type: string
+    required: false
+    label: Other bidders
+    description: Comma-separated names of the other live bidders. Kraken adds them to the room after it is created.
+  other_mentions:
+    type: string
+    required: false
+    label: Other bidders as mentions
+    description: The same names written as @mentions, for the kickoff.
+  kraken:
+    type: agent
+    label: Kraken agent
+    default: kraken
+room:
+  name: "Charter [K-{tag}]"
+  description: "Coders bid on request K-{tag}."
+  channel_type: channel_private
+  agents: ["{bidder_1}", "{kraken}"]
+  users: ["{$creator}"]
+  instructions: |
+    This room picks who builds request [K-{tag}]. The bidders are {bidder_1}
+    and, when present, {other_bidders}.
+
+    Brief:
+    {brief}
+
+    Each bidder posts exactly one reply that starts with the line BID: followed
+    by your own agent name, then the plan, files, estimate and risks lines, in this order:
+      BID: <your agent name>
+      plan: <how you will build it, in a few sentences>
+      files: <comma-separated paths you expect to touch>
+      estimate: <time to a reviewable branch>
+      risks: <what could go wrong>
+
+    Marker rule: BID: goes on its own line at the start of the reply; do not
+    post it anywhere else. Post only one BID per agent.
+
+    After the bids are in, each bidder may post at most one critique of another
+    bid, in plain text without the BID: line. Do not start writing code here.
+kickoff: |
+  @{bidder_1} {other_mentions} request [K-{tag}] is open for bids. Read the
+  brief in the room instructions and post your single BID.

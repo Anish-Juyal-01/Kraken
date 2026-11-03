@@ -1,0 +1,37 @@
+# Kraken HQ: the two standing rooms. Create once from Switch Console.
+version: 1
+params:
+  requests:
+    type: string
+    label: Requests room name
+    default: kraken-requests
+  hallmark:
+    type: string
+    label: Hallmark room name
+    default: kraken-hallmark
+  kraken:
+    type: agent
+    label: Kraken agent
+    default: kraken
+group:
+  name: Kraken
+  description: Kraken turns a chat request into a planned, built and stress-tested change.
+rooms:
+  - name: "{requests}"
+    description: Ask Kraken for work here, for example "@kraken build password reset".
+    channel_type: channel_private
+    agents: ["{kraken}"]
+    users: ["{$creator}"]
+    instructions: |
+      Team requests go here. Kraken opens one room per stage of each request.
+    kickoff: |
+      This is the Kraken requests room. Mention @kraken with what you want built.
+  - name: "{hallmark}"
+    description: The decision ledger. Kraken posts every settled decision here.
+    channel_type: channel_private
+    agents: ["{kraken}"]
+    users: ["{$creator}"]
+    instructions: |
+      Kraken publishes Hallmark entries here, one message per settled decision.
+    kickoff: |
+      This is the Kraken Hallmark room. Settled decisions are posted here.

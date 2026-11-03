@@ -21,3 +21,9 @@ timeouts_s:
   storm: 1800
 db_path: kraken.db
 relay_port: 8765
+kraken_agent: kraken
+agents:
+  planner: kraken-planner
+  attacker: squall
+  defender: storm-defender
+  coach: storm-coach

@@ -22,6 +22,13 @@ class RoomsConfig(BaseModel):
     hallmark: str = "kraken-hallmark"
 
 
+class AgentsConfig(BaseModel):
+    planner: str = "kraken-planner"
+    attacker: str = "squall"
+    defender: str = "storm-defender"
+    coach: str = "storm-coach"
+
+
 AUTONOMY_KEYS = ("brief", "pick", "merge", "storm_result")
 
 
@@ -39,6 +46,8 @@ class Config(BaseModel):
     autonomy: dict[str, AutonomyValue] = Field(default_factory=_default_autonomy)
     rooms: RoomsConfig = Field(default_factory=RoomsConfig)
     bidders: list[str] = Field(default_factory=list)
+    kraken_agent: str = "kraken"
+    agents: AgentsConfig = Field(default_factory=AgentsConfig)
     timeouts_s: dict[str, int] = Field(default_factory=_default_timeouts)
     db_path: str = "kraken.db"
     relay_port: int = 8765

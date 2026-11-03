@@ -53,6 +53,14 @@ async def extract(llm: LLM, msg: Event, self_id: str, min_words: int) -> list[Cl
         return []
     if msg.payload.get("sender") == self_id or _skip_body(body):
         return []
+    return await extract_claims(llm, msg, min_words)
+
+
+async def extract_claims(llm: LLM, msg: Event, min_words: int) -> list[Claim]:
+    """Quote-strip, filter and extract; no own-sender or tag/marker skips."""
+    body = msg.payload.get("body")
+    if msg.type != "message" or not isinstance(body, str):
+        return []
     text = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith(">"))
     if len(text.split()) < min_words:
         return []

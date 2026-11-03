@@ -1,0 +1,290 @@
+import dataclasses
+
+from kraken.conductor.commands import Command
+from kraken.conductor.state import Signal, stage_room, step
+from kraken.config import Config
+from kraken.hallmark.ledger import Request
+
+ALL_AUTO = dict(brief="auto", pick="auto", merge="auto", storm_result="auto")
+
+
+def req(**kw) -> Request:
+    base = dict(id=1, owner="sam", text="build reset", origin_room="req-room", state="SPARK")
+    base.update(kw)
+    return Request(**base)
+
+
+def cfg_with(**kw) -> Config:
+    return Config(**kw)
+
+
+def apply(r: Request, updates: dict, actions) -> Request:
+    return dataclasses.replace(r, **updates)
+
+
+def cmd(kind, arg=None, tag=None):
+    return Command(kind=kind, arg=arg, tag=tag, user="u")
+
+
+def gated(state, gate, **kw):
+    return req(state=state, data={"gate": gate}, **kw)
+
+
+def kinds(acts):
+    return [a.kind for a in acts]
+
+
+def test_full_happy_path_auto():
+    cfg = cfg_with(autonomy=ALL_AUTO)
+    r = req(state="SPARK")
+    seq = [Signal(kind="brief_posted", data={"brief": "b"}), Signal(kind="preflight_clear"),
+           Signal(kind="bid", data={"agent": "codex-coder"}),
+           Signal(kind="bids_done", data={"judged_winner": "codex-coder"}),
+           Signal(kind="accepted"), Signal(kind="survived")]
+    for s in seq:
+        r = apply(r, *step(r, cfg, s))
+    assert r.state == "CLOSED" and r.winner == "codex-coder"
+
+
+def test_storm_fail_loops_then_pings_owner():
+    cfg = cfg_with(autonomy=ALL_AUTO)
+    r = req(state="STORM")
+    for i in range(2):
+        upd, acts = step(r, cfg, Signal(kind="failed", data={"findings": "bad"}))
+        r = apply(r, upd, acts)
+        assert r.state == "FORGE" and r.storm_round == i + 1
+        assert acts[0].kind == "post" and acts[0].stage == "forge"
+        assert acts[0].text == f"Storm round {i + 1} failed:\nbad"
+        r = apply(r, *step(r, cfg, Signal(kind="accepted")))
+        assert r.state == "STORM"
+    upd, acts = step(r, cfg, Signal(kind="failed"))
+    r = apply(r, upd, acts)
+    assert r.state == "STORM" and r.storm_round == 3
+    assert kinds(acts) == ["ping_owner"]
+
+
+def test_stale_command_rejected():
+    upd, acts = step(req(state="FORGE", id=4), Config(), Command(kind="pick", arg="1", user="u", tag=4))
+    assert upd == {} and "already past" in acts[0].text
+
+
+def test_wrong_tag_rejected():
+    upd, acts = step(gated("SPARK", "brief", id=2), Config(), cmd("approve", tag=9))
+    assert upd == {} and acts[0].text == "[K-2] is already past that step"
+    assert acts[0].room == "stage"
+
+
+def test_gate_command_without_gate_rejected():
+    upd, acts = step(req(state="SPARK"), Config(), cmd("approve"))
+    assert upd == {} and acts[0].text == "[K-1] is already past that step"
+
+
+def test_gate_command_wrong_gate_rejected():
+    upd, acts = step(gated("FORGE", "pick"), Config(), cmd("approve"))
+    assert upd == {} and "already past" in acts[0].text
+
+
+def test_spark_brief_human_gates():
+    upd, acts = step(req(), Config(), Signal(kind="brief_posted", data={"brief": "b"}))
+    assert upd["brief"] == "b" and upd["data"]["gate"] == "brief" and "state" not in upd
+    assert acts[0].kind == "post" and acts[0].text.startswith("[K-1] Brief ready.")
+    assert "\U0001f44d approve · \U0001f44e reject" in acts[0].text
+
+
+def test_spark_brief_auto_goes_preflight():
+    upd, acts = step(req(), cfg_with(autonomy=ALL_AUTO), Signal(kind="brief_posted", data={"brief": "b"}))
+    assert upd["state"] == "PREFLIGHT" and upd["brief"] == "b"
+    assert acts[0].text == "running Sonar pre-flight"
+
+
+def test_spark_approve():
+    upd, acts = step(gated("SPARK", "brief"), Config(), cmd("approve"))
+    assert upd["state"] == "PREFLIGHT" and "gate" not in upd["data"]
+    assert acts[0].text == "running Sonar pre-flight"
+
+
+def test_spark_reject():
+    upd, acts = step(gated("SPARK", "brief"), Config(), cmd("reject", "too vague"))
+    assert "state" not in upd and "gate" not in upd["data"]
+    assert acts[0].stage == "spark" and acts[0].text == "Revise the brief: too vague"
+    _, acts = step(gated("SPARK", "brief"), Config(), cmd("reject"))
+    assert acts[0].text == "Revise the brief: no reason given"
+
+
+def test_preflight_clear():
+    upd, acts = step(req(state="PREFLIGHT"), Config(), Signal(kind="preflight_clear"))
+    assert upd["state"] == "CHARTER"
+    assert acts[0].kind == "open_stage" and acts[0].stage == "charter"
+
+
+def test_preflight_conflicts_post_and_gate():
+    upd, acts = step(req(state="PREFLIGHT"), Config(),
+                     Signal(kind="preflight_conflicts", data={"conflicts": ["c1", "c2"]}))
+    assert "state" not in upd and upd["data"]["gate"] == "preflight"
+    assert [a.text for a in acts[:2]] == ["c1", "c2"]
+    assert acts[2].text.startswith("[K-1] Resolve the conflicts above, then approve.")
+    assert acts[2].text.endswith("\U0001f44d approve")
+
+
+def test_preflight_approve():
+    upd, acts = step(gated("PREFLIGHT", "preflight"), Config(), cmd("approve"))
+    assert upd["state"] == "CHARTER" and "gate" not in upd["data"]
+    assert acts[0].kind == "open_stage" and acts[0].stage == "charter"
+
+
+def test_charter_bid_appends():
+    r = req(state="CHARTER", bids=[{"agent": "a"}])
+    upd, acts = step(r, Config(), Signal(kind="bid", data={"agent": "b", "plan": "x"}))
+    assert upd == {"bids": [{"agent": "a"}, {"agent": "b", "plan": "x"}]} and acts == []
+    assert r.bids == [{"agent": "a"}]
+
+
+def test_charter_bids_done_human_prompt():
+    r = req(state="CHARTER", bids=[{"agent": "a"}, {"agent": "b"}])
+    for kind in ("bids_done", "timeout"):
+        upd, acts = step(r, Config(), Signal(kind=kind))
+        assert upd["data"]["gate"] == "pick" and "state" not in upd
+        assert acts[0].text == "[K-1] Bids are in. Pick one.\n1️⃣ a · 2️⃣ b"
+
+
+def test_charter_bids_done_auto():
+    r = req(state="CHARTER", bids=[{"agent": "a"}])
+    upd, acts = step(r, cfg_with(autonomy=ALL_AUTO), Signal(kind="bids_done", data={"judged_winner": "a"}))
+    assert upd["winner"] == "a" and upd["state"] == "FORGE"
+    assert acts[0].kind == "open_stage" and acts[0].stage == "forge"
+
+
+def test_charter_no_bids_pings_owner():
+    for kind in ("bids_done", "timeout"):
+        upd, acts = step(req(state="CHARTER"), Config(), Signal(kind=kind))
+        assert upd == {} and kinds(acts) == ["ping_owner"]
+        assert acts[0].room == "origin" and acts[0].text.startswith("[K-1] needs you: ")
+
+
+def test_charter_pick_by_index_and_name():
+    bids = [{"agent": "a"}, {"agent": "b"}]
+    for arg, want in (("2", "b"), ("a", "a")):
+        upd, acts = step(gated("CHARTER", "pick", bids=bids), Config(), cmd("pick", arg))
+        assert upd["winner"] == want and upd["state"] == "FORGE" and "gate" not in upd["data"]
+        assert acts[0].kind == "open_stage" and acts[0].stage == "forge"
+
+
+def test_charter_pick_unknown():
+    bids = [{"agent": "a"}]
+    for arg in ("zzz", "0", "2"):
+        upd, acts = step(gated("CHARTER", "pick", bids=bids), Config(), cmd("pick", arg))
+        assert upd == {} and acts[0].text == f"[K-1] no bid matches '{arg}'"
+
+
+def test_forge_accepted_human_gate():
+    upd, acts = step(req(state="FORGE"), Config(), Signal(kind="accepted"))
+    assert upd["data"]["gate"] == "merge" and "state" not in upd
+    assert acts[0].text.startswith("[K-1] Reviewers accepted. Merge?")
+
+
+def test_forge_accepted_auto_storm_or_skip():
+    cfg = cfg_with(autonomy=ALL_AUTO)
+    upd, acts = step(req(state="FORGE"), cfg, Signal(kind="accepted"))
+    assert upd["state"] == "STORM" and acts[0].stage == "storm" and acts[0].kind == "open_stage"
+    upd, acts = step(req(state="FORGE", storm_mode="skip"), cfg, Signal(kind="accepted"))
+    assert upd["state"] == "CLOSED" and acts[0].kind == "close"
+
+
+def test_forge_approve_and_reject():
+    upd, acts = step(gated("FORGE", "merge"), Config(), cmd("approve"))
+    assert upd["state"] == "STORM" and "gate" not in upd["data"] and acts[0].stage == "storm"
+    upd, acts = step(gated("FORGE", "merge", storm_mode="skip"), Config(), cmd("approve"))
+    assert upd["state"] == "CLOSED" and acts[0].kind == "close"
+    upd, acts = step(gated("FORGE", "merge"), Config(), cmd("reject", "nope"))
+    assert "state" not in upd and "gate" not in upd["data"]
+    assert acts[0].stage == "forge" and acts[0].text == "Changes requested: nope"
+
+
+def test_close_action_shape():
+    _, acts = step(req(state="FORGE", storm_mode="skip", id=7), cfg_with(autonomy=ALL_AUTO),
+                   Signal(kind="accepted"))
+    assert acts[0].room == "origin" and acts[0].text == "[K-7] closed"
+
+
+def test_storm_survived_human_then_approve():
+    upd, acts = step(req(state="STORM"), Config(), Signal(kind="survived"))
+    assert upd["data"]["gate"] == "storm_result" and "state" not in upd
+    assert acts[0].text.startswith("[K-1] Storm survived. Accept?")
+    upd, acts = step(gated("STORM", "storm_result"), Config(), cmd("approve"))
+    assert upd["state"] == "CLOSED" and kinds(acts) == ["publish_hallmark", "close"]
+
+
+def test_storm_survived_auto():
+    upd, acts = step(req(state="STORM"), cfg_with(autonomy=ALL_AUTO), Signal(kind="survived"))
+    assert upd["state"] == "CLOSED" and kinds(acts) == ["publish_hallmark", "close"]
+
+
+def test_storm_reject_loops_to_forge():
+    r = gated("STORM", "storm_result", storm_round=0)
+    upd, acts = step(r, Config(), cmd("reject", "flaky"))
+    assert upd["state"] == "FORGE" and upd["storm_round"] == 1 and "gate" not in upd["data"]
+    assert acts[0].stage == "forge" and acts[0].text == "Storm round 1 failed:\nflaky"
+
+
+def test_storm_reject_at_cap_pings():
+    r = gated("STORM", "storm_result", storm_round=2)
+    upd, acts = step(r, Config(), cmd("reject", "flaky"))
+    assert "state" not in upd and upd["storm_round"] == 3 and kinds(acts) == ["ping_owner"]
+
+
+def test_storm_command_sets_mode():
+    for state in ("SPARK", "PREFLIGHT", "CHARTER", "FORGE", "STORM", "RESOLVING"):
+        upd, acts = step(req(state=state), Config(), cmd("storm", "drill"))
+        assert upd == {"storm_mode": "drill"}
+        assert acts[0].kind == "post" and acts[0].text == "Storm mode set to drill"
+    assert step(req(state="CLOSED"), Config(), cmd("storm", "drill")) == ({}, [])
+
+
+def test_retry_opens_current_stage():
+    for state in ("SPARK", "CHARTER", "FORGE", "STORM"):
+        upd, acts = step(req(state=state), Config(), cmd("retry"))
+        assert upd == {} and acts[0].kind == "open_stage" and acts[0].stage == state.lower()
+    assert step(req(state="PREFLIGHT"), Config(), cmd("retry")) == ({}, [])
+
+
+def test_resolving_resolved_and_not_conflict():
+    upd, acts = step(req(state="RESOLVING"), Config(), Signal(kind="resolved", data={"brief": "nb"}))
+    assert upd["state"] == "CHARTER" and upd["brief"] == "nb" and acts[0].stage == "charter"
+    upd, acts = step(req(state="RESOLVING"), Config(), cmd("not_conflict"))
+    assert upd["state"] == "CLOSED" and acts[0].kind == "close"
+
+
+def test_timeout_pings_owner():
+    for state in ("SPARK", "FORGE", "STORM"):
+        upd, acts = step(req(state=state), Config(), Signal(kind="timeout"))
+        assert upd == {} and kinds(acts) == ["ping_owner"]
+
+
+def test_unlisted_and_closed_ignored():
+    assert step(req(state="PREFLIGHT"), Config(), Signal(kind="survived")) == ({}, [])
+    assert step(req(state="CLOSED"), Config(), Signal(kind="timeout")) == ({}, [])
+    assert step(gated("CLOSED", "pick"), Config(), cmd("pick", "1")) == ({}, [])
+
+
+def test_stage_room_names():
+    assert stage_room("RESOLVING") == "sonar-resolution" and stage_room("FORGE") == "forge"
+
+
+def test_step_does_not_mutate_request():
+    r = gated("SPARK", "brief")
+    step(r, Config(), cmd("approve"))
+    assert r.data == {"gate": "brief"} and r.state == "SPARK"
+
+
+def test_charter_timeout_auto_pick_falls_back_to_first_bid():
+    r = req(state="CHARTER", bids=[{"agent": "a"}, {"agent": "b"}])
+    upd, acts = step(r, cfg_with(autonomy=ALL_AUTO), Signal(kind="timeout"))
+    assert upd["winner"] == "a" and upd["state"] == "FORGE"
+    assert acts[0].kind == "open_stage" and acts[0].stage == "forge"
+
+
+def test_charter_auto_pick_unknown_judged_winner_falls_back():
+    r = req(state="CHARTER", bids=[{"agent": "a"}, {"agent": "b"}])
+    upd, acts = step(r, cfg_with(autonomy=ALL_AUTO),
+                     Signal(kind="bids_done", data={"judged_winner": "ghost"}))
+    assert upd["winner"] == "a" and upd["state"] == "FORGE"

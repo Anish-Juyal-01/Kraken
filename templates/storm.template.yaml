@@ -1,0 +1,68 @@
+version: 1
+params:
+  tag:
+    type: string
+    label: Request tag
+  brief:
+    type: string
+    multiline: true
+    label: Brief
+  diff_ref:
+    type: string
+    label: What to attack
+    description: The branch or diff the coder produced.
+  mode:
+    type: enum
+    enum: [auto, drill, skip]
+    default: auto
+    label: Storm mode
+  attacker:
+    type: agent
+    label: Attacker
+    default: squall
+  defender:
+    type: agent
+    label: Defender
+    default: storm-defender
+  coach:
+    type: agent
+    label: Coach
+    default: storm-coach
+  kraken:
+    type: agent
+    label: Kraken agent
+    default: kraken
+room:
+  name: "Storm [K-{tag}]"
+  description: "Stress test of request K-{tag}."
+  channel_type: channel_private
+  agents: ["{attacker}", "{defender}", "{coach}", "{kraken}"]
+  users: ["{$creator}"]
+  instructions: |
+    This room stress-tests the change for request [K-{tag}]: {diff_ref}.
+    This round runs in {mode} mode.
+
+    Brief:
+    {brief}
+
+    Attacker ({attacker}): pick exactly 3 faults and inject them one at a time
+    with python -m storm.faults <name>. Post each fault name and what broke.
+
+    Defender ({defender}):
+    - auto mode: fix every failure the faults expose, commit the fix to the
+      branch, and say what you changed.
+    - drill mode: do not change code. Give hints only, so the team can practise
+      the fix themselves.
+
+    Coach ({coach}): after the 3 faults, judge the round. End with a line that
+    is exactly SURVIVED if the change held up, or exactly FAILED if it did not,
+    followed by your findings.
+
+    Marker rule: SURVIVED and FAILED are written only by the coach, each on its
+    own line, once, at the end of the round.
+kickoff: |
+  @{attacker} @{defender} @{coach} stress test for request [K-{tag}] ({mode} mode).
+
+  @{attacker}: pick 3 faults and start injecting them.
+  @{defender}: respond to each fault as the room instructions say for this mode.
+  @{coach}: watch the round and end it with SURVIVED or FAILED.

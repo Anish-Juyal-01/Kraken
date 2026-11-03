@@ -22,7 +22,7 @@ class JudgeAnswer(BaseModel):
     reason: str
 
 
-def _norm(value: str) -> str:
+def norm_value(value: str) -> str:
     return " ".join(value.lower().split())
 
 
@@ -42,7 +42,7 @@ async def detect(llm: LLM, ledger: Ledger, claim_id: int, c: Claim,
     needed = threshold + 0.05 * min(ledger.dismissal_count(c.subject, c.attribute), 4)
     raised: list[Conflict] = []
     for earlier_id, earlier in ledger.claims_for(c.subject, c.attribute):
-        if earlier_id == claim_id or _norm(earlier.value) == _norm(c.value):
+        if earlier_id == claim_id or norm_value(earlier.value) == norm_value(c.value):
             continue
         if ledger.pair_seen(earlier_id, claim_id):
             continue
