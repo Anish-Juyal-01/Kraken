@@ -23,8 +23,33 @@ def test_empty_file_loads_defaults(tmp_path):
 
 def test_repo_config_parses():
     c = load_config("kraken.yaml")
-    assert "demo/shopfront" in c.sonar.code_paths
+    shop = c.projects[0]
+    assert shop.name == "shopfront" and shop.code_paths == ["demo/shopfront"]
+    assert shop.mode == "http" and shop.chaos_endpoint == "/__chaos" and shop.workdir == "."
     assert c.bidders == ["claude-coder", "claude-coder-2", "claude-coder-3"]
+    assert c.deliver == "pr"
+
+
+def test_legacy_sonar_code_paths_become_a_project(tmp_path):
+    p = tmp_path / "k.yaml"
+    p.write_text("sonar: {code_paths: [src]}")
+    (proj,) = load_config(str(p)).projects
+    assert proj.name == "default" and proj.code_paths == ["src"] and proj.mode == "library"
+
+
+def test_project_workdir_and_index_paths():
+    from kraken.config import ProjectConfig
+    p = ProjectConfig(name="api", repo="https://github.com/o/api", root="workspace/api",
+                      code_paths=["src", "config"])
+    assert p.workdir == "projects/api"
+    assert [x.replace("\\", "/") for x in p.index_paths()] == ["workspace/api/src", "workspace/api/config"]
+    assert ProjectConfig(name="x", root="r").index_paths() == ["r"]
+
+
+def test_project_name_must_be_safe():
+    from kraken.config import ProjectConfig
+    with pytest.raises(ValidationError):
+        ProjectConfig(name="../evil")
 
 
 def test_bad_autonomy_value_rejected(tmp_path):

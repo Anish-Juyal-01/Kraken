@@ -1,4 +1,10 @@
-"""Storm fault toolkit: `python -m storm.faults <fault> [--target api|email] [--seconds N]`."""
+"""Storm fault toolkit.
+
+Any project: `python -m storm.faults --project storm-project.json --list`, then
+`python -m storm.faults <fault> --project storm-project.json` (see storm.project_faults).
+The bundled shopfront demo without a project file:
+`python -m storm.faults <fault> [--target api|email] [--seconds N]`.
+"""
 import argparse
 import asyncio
 import json
@@ -13,14 +19,15 @@ DEFAULT_LIMITS = Path("demo/shopfront/config/limits.yaml")
 FAULTS = ("kill", "latency", "bad_payload", "flood", "bad_config")
 
 
-def start_fault(client, fault: str, target: str = "api", params: dict | None = None) -> None:
+def start_fault(client, fault: str, target: str = "api", params: dict | None = None,
+                path: str = "/__chaos") -> None:
     """Enable a server-side fault via the control endpoint (client: httpx.Client or TestClient)."""
-    resp = client.post("/__chaos", json={"fault": fault, "target": target, "params": params or {}})
+    resp = client.post(path, json={"fault": fault, "target": target, "params": params or {}})
     resp.raise_for_status()
 
 
-def clear_faults(client) -> None:
-    client.delete("/__chaos").raise_for_status()
+def clear_faults(client, path: str = "/__chaos") -> None:
+    client.delete(path).raise_for_status()
 
 
 async def flood(base_url: str, count: int = 200) -> dict[str, int]:
@@ -64,20 +71,50 @@ def run(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="storm.faults")
-    p.add_argument("fault", choices=FAULTS)
+    from storm.project_faults import HTTP_FAULTS, LIBRARY_FAULTS  # noqa: PLC0415
+    p = argparse.ArgumentParser(prog="storm.faults", description=__doc__.splitlines()[0])
+    p.add_argument("fault", nargs="?", choices=sorted({*FAULTS, *HTTP_FAULTS, *LIBRARY_FAULTS}))
+    p.add_argument("--project", help="project file (JSON or YAML) from the Storm room")
+    p.add_argument("--list", action="store_true", help="list the faults that fit the project")
     p.add_argument("--target", choices=("api", "email"), default="api")
     p.add_argument("--seconds", type=float, default=30)
     p.add_argument("--base-url", default="http://127.0.0.1:8080")
     p.add_argument("--ms", type=int, default=2000, help="latency in milliseconds")
     p.add_argument("--count", type=int, default=200, help="flood request count")
+    p.add_argument("--share", type=float, default=0.3, help="share of connections drop discards")
+    p.add_argument("--rounds", type=int, default=3, help="probes per endpoint through the proxy")
+    p.add_argument("--timeout", type=float, default=1.0, help="client timeout for probes, seconds")
+    p.add_argument("--test-timeout", type=float, default=900, help="max seconds per test run")
+    p.add_argument("--use-running", action="store_true",
+                   help="attack an app already serving base_url instead of starting the branch")
     p.add_argument("--limits", default=str(DEFAULT_LIMITS), help="limits.yaml for bad_config")
     return p
 
 
 def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
     try:
-        run(build_parser().parse_args(argv))
+        if args.project:
+            from storm import project_faults as pf  # noqa: PLC0415
+            project = pf.load_project(args.project)
+            if args.list or not args.fault:
+                faults = pf.available(project)
+                mode = "web service" if project.get("run") else "library (tests under faults)"
+                print(f"{project.get('name', 'project')}: {mode}")
+                for name, what in faults.items():
+                    print(f"  {name:12} {what}")
+                if not faults:
+                    print("  none: the project needs a run command or a test command")
+                return
+            print(json.dumps(pf.run_fault(args.fault, project, args)), flush=True)
+            return
+        if args.list or not args.fault:
+            print("shopfront demo faults: " + ", ".join(FAULTS) +
+                  "\nfor any other project pass --project <file> (see --help)")
+            return
+        if args.fault not in FAULTS:
+            raise SystemExit(f"{args.fault} needs --project <file>")
+        run(args)
     except KeyboardInterrupt:
         pass
 

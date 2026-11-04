@@ -26,7 +26,7 @@ params:
     input: advanced
   repo:
     type: string
-    description: Repository each agent clones (the shopfront demo app lives in demo/shopfront).
+    description: Each agent's home checkout. Kraken itself, so storm.faults is at hand; the projects the crew works on are cloned per request into projects/<name> (the bundled demo lives in demo/shopfront).
     default: https://github.com/Anish-Juyal-01/Kraken
     input: advanced
 
@@ -57,14 +57,16 @@ agents:
     directory: "{directory}"
     repo: "{repo}"
     instructions: &coder |
-      You are a Kraken bidder and builder working on the shopfront app in
-      demo/shopfront of your clone. In a Charter room, post exactly one bid in
-      the format the room asks for, starting with a line `BID: <your name>`.
-      In a Forge room, follow the room's instructions: as the coder, work on a
-      branch named after the room tag and post your plan before your first
-      commit; as a reviewer, check the work against the brief's acceptance
-      criteria and post `ACCEPTED` on its own line only when every criterion
-      is met. Never push to the remote unless a person asks you to.
+      You are a Kraken bidder and builder. Every room names the project you work
+      on and the folder to use (its "Project" section): clone or update that repo
+      there and work only in it. In a Charter room, post exactly one bid in the
+      format the room asks for, starting with a line `BID: <your name>`. In a
+      Forge room, follow the room's instructions: as the coder, work on a branch
+      named after the room tag and post your plan before your first commit; as a
+      reviewer, run the project's tests and check the work against the brief's
+      acceptance criteria, and post `ACCEPTED` on its own line only when every
+      criterion is met. Push or open a pull request only when Kraken asks you to
+      in the room, after a person approved it.
 
   - name: claude-coder-2
     display_name: Claude Coder 2
@@ -90,7 +92,7 @@ agents:
 
   - name: squall
     display_name: Squall
-    description: Storm attacker — injects faults into shopfront
+    description: Storm attacker — injects faults into the project under test
     addressing: anyone
     auto_mode: true
     provider: claude
@@ -99,11 +101,12 @@ agents:
     repo: "{repo}"
     instructions: |
       You are Storm's attacker. In a Storm room, read the brief and the change,
-      pick three faults aimed at the changed code and run them with
-      `python -m storm.faults <fault>` from the root of your clone (faults:
-      kill, latency, bad_payload, flood, bad_config; see `--help`). If the
-      import fails, run `pip install -e .` in your clone once first. Post each
-      fault you ran and what broke. Never start a line with SURVIVED or FAILED.
+      save the room's project file, list the faults that fit this project with
+      `python -m storm.faults --project storm-project.json --list` from the root
+      of your Kraken checkout, pick three aimed at the changed code and run them
+      one at a time. If the import fails, run `pip install -e .` in your checkout
+      once first. Post each fault you ran and what broke, then mention the
+      defender and the coach. Never start a line with SURVIVED or FAILED.
 
   - name: storm-defender
     display_name: Storm Defender

@@ -1,11 +1,12 @@
 import asyncio
+import json
 import re
 from pathlib import Path
 
 import httpx
 import yaml
 
-from kraken.config import Config
+from kraken.config import Config, ProjectConfig
 from kraken.crew import Crew, Role
 from kraken.hallmark.ledger import Request
 from kraken.switch_client import SwitchClient, SwitchError
@@ -95,14 +96,52 @@ def _agent(stage: str, role: Role, cfg: Config, crew: Crew | None) -> str:
     return name
 
 
-def stage_inputs(stage: str, req: Request, cfg: Config, crew: Crew | None = None, **extra) -> dict:
+def project_block(p: ProjectConfig | None) -> str:
+    """What every stage room is told about the codebase it works on."""
+    if p is None:
+        return "Project: not set. Work in your own checkout."
+    lines = [f"Project: {p.name}" + (f" — {p.description}" if p.description else "")]
+    if p.repo:
+        lines.append(f"Repo: {p.repo} (base branch {p.branch}). Work in the folder {p.workdir} "
+                     f"inside your own folder: if it is missing, run "
+                     f"`git clone {p.repo} {p.workdir}`; otherwise `git -C {p.workdir} fetch origin`. "
+                     f"Branch from origin/{p.branch}.")
+    else:
+        lines.append("Repo: your own checkout (this repository). Work at its root.")
+    if p.language:
+        lines.append(f"Language: {p.language}")
+    lines.append(f"Tests: `{p.test}`" if p.test else "Tests: none known; say so and add one.")
+    if p.mode == "http":
+        lines.append(f"Run: `{p.run}`, serving {p.base_url or 'a local port'}"
+                     + (f" (health check {p.health})" if p.health else ""))
+    else:
+        lines.append("Run: no server (a library or CLI).")
+    if p.code_paths:
+        lines.append(f"Code lives in: {', '.join(p.code_paths)}")
+    return "\n".join(lines)
+
+
+def storm_project_file(p: ProjectConfig | None) -> str:
+    """The project as one line of JSON, for `python -m storm.faults --project <file>`."""
+    if p is None:
+        return "{}"
+    keep = ("name", "repo", "branch", "test", "run", "base_url", "health", "endpoints",
+            "config_files", "chaos_endpoint")
+    data = {k: v for k, v in p.model_dump().items() if k in keep and v not in (None, [], "")}
+    data["workdir"] = p.workdir
+    return json.dumps(data)
+
+
+def stage_inputs(stage: str, req: Request, cfg: Config, crew: Crew | None = None,
+                 project: ProjectConfig | None = None, **extra) -> dict:
     tag = str(req.id)
-    base = {"tag": tag, "kraken": cfg.kraken_agent}
+    base = {"tag": tag, "kraken": cfg.kraken_agent, "project": project_block(project)}
+    workdir = {"workdir": project.workdir if project else "."}  # only Forge and Storm declare it
     if stage == "spark":
         inputs = {**base, "request": req.text, "planner": _agent(stage, "planner", cfg, crew),
                   "owner": req.owner}
     elif stage == "sonar-resolution":
-        inputs = base
+        inputs = {"tag": tag, "kraken": cfg.kraken_agent}  # about chat, not a codebase
     elif stage == "charter":
         default = crew.members("bidder") if crew is not None else cfg.bidders
         parts = _split(stage, list(extra.pop("bidders", default)), "bidders")
@@ -112,11 +151,12 @@ def stage_inputs(stage: str, req: Request, cfg: Config, crew: Crew | None = None
         agents = [b["agent"] for b in req.bids]
         reviewers = extra.pop("reviewers", [a for a in agents if a != req.winner])
         parts = _split(stage, list(reviewers), "reviewers")
-        inputs = {**base, "brief": req.brief or "", "coder": req.winner,
+        inputs = {**base, **workdir, "brief": req.brief or "", "coder": req.winner,
                   "reviewer_1": parts["first"], "other_reviewers": parts["rest"],
                   "other_reviewer_mentions": parts["mentions"]}
     elif stage == "storm":
-        inputs = {**base, "brief": req.brief or "", "diff_ref": f"branch kraken/K-{req.id}",
+        inputs = {**base, **workdir, "brief": req.brief or "", "diff_ref": f"branch kraken/K-{req.id}",
+                  "project_file": storm_project_file(project),
                   "mode": req.storm_mode, "attacker": _agent(stage, "attacker", cfg, crew),
                   "defender": _agent(stage, "defender", cfg, crew),
                   "coach": _agent(stage, "coach", cfg, crew)}

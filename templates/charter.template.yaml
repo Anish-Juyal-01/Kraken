@@ -20,6 +20,12 @@ params:
     required: false
     label: Other bidders as mentions
     description: The same names written as @mentions, for the kickoff.
+  project:
+    type: string
+    multiline: true
+    required: false
+    label: Project
+    description: The codebase, built by Kraken from the project's settings.
   kraken:
     type: agent
     label: Kraken agent
@@ -32,6 +38,11 @@ room:
   instructions: |
     This room picks who builds request [K-{tag}]. The bidders are {bidder_1}
     and, when present, {other_bidders}.
+
+    {project}
+
+    Read the code before you bid (clone it as described above if you need to),
+    so your files and risks name real paths.
 
     Brief:
     {brief}

@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from kraken.conductor.state import Action, Signal
-from kraken.config import Config
+from kraken.config import Config, ProjectConfig
 from kraken.crew import Crew
 from kraken.dispatch import Dispatcher
 from kraken.llm import LLMParseError
@@ -84,6 +84,8 @@ def make(ledger, client=None, llm=None, **cfg):
                    self_id="kraken-id")
     d.room_ids = {"kraken-requests": REQ_ROOM}
     Crew(ledger).seed(d.cfg)
+    if not d.projects.all():
+        d.projects.put(ProjectConfig(name="app", test="pytest"))
     return client, d
 
 
@@ -289,7 +291,7 @@ async def test_preflight_conflicts_rendered_and_posted(ledger):
 
 
 async def test_timeout_tick_emits_once(ledger):
-    client, d = make(ledger)
+    client, d = make(ledger, agent_quiet_s=0)  # stage timeouts only, no quiet-agent nudges
     rid = request_in(ledger, "CHARTER", rooms={"charter": "ch"},
                      data={"live_bidders": BIDDERS, "stage_started": 1000.0})
     await d.tick(1000.0 + 100)
@@ -312,6 +314,38 @@ async def test_auto_pick_uses_judged_winner(ledger):
     assert req.state == "FORGE" and req.winner == "codex-coder"
     assert llm.calls[0]["user"].startswith("Brief:\nB") and "2. codex-coder" in llm.calls[0]["user"]
     assert "order the bids are listed in means nothing" in llm.calls[0]["system"]
+
+
+async def test_pr_marker_from_the_coder_closes_with_the_link(ledger):
+    client, d = make(ledger)
+    rid = request_in(ledger, "DELIVER", rooms={"forge": "fg", "storm": "st"},
+                     winner="claude-coder", data={"delivering": True},
+                     bids=[{"agent": "claude-coder"}])
+    await d.handle(ev(1, "PR: https://github.com/o/r/pull/7 (opened)", room="fg", name="codex-coder"))
+    assert ledger.get_request(rid).state == "DELIVER"  # only the coder's marker counts
+    await d.handle(ev(2, "pushed.\nPR: <https://github.com/o/r/pull/7>", room="fg", name="claude-coder"))
+    req = ledger.get_request(rid)
+    assert req.state == "CLOSED" and req.data["pr"] == "https://github.com/o/r/pull/7"
+    assert any("pull request: https://github.com/o/r/pull/7" in t for t in client.texts(REQ_ROOM))
+
+
+async def test_pr_failed_marker_pings_the_owner(ledger):
+    client, d = make(ledger)
+    rid = request_in(ledger, "DELIVER", rooms={"forge": "fg"}, winner="claude-coder",
+                     data={"delivering": True}, bids=[{"agent": "claude-coder"}])
+    await d.handle(ev(1, "PR FAILED: no push access", room="fg", name="claude-coder"))
+    assert ledger.get_request(rid).state == "DELIVER"
+    assert any("no push access" in t for t in client.texts(REQ_ROOM))
+
+
+async def test_deliver_approve_in_the_storm_room(ledger):
+    client, d = make(ledger)
+    rid = request_in(ledger, "DELIVER", rooms={"forge": "fg", "storm": "st"},
+                     winner="claude-coder", data={"gate": "deliver"})
+    await d.handle(ev(1, "approve", room="st", name="sam"))
+    assert ledger.get_request(rid).data["delivering"]
+    ask = client.texts("fg")[-1]
+    assert ask.startswith("@claude-coder [K-1] approved.") and "push the branch kraken/K-1" in ask
 
 
 async def test_switch_status_notices_are_ignored(ledger):

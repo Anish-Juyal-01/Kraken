@@ -6,12 +6,22 @@ Kraken is an AI crew that lives in your team chat through [Switch](https://docs.
 
 Built for the Flip the Switch hackathon (WeMakeDevs, Nov 4-7 2026), Track 01: Best Business Workflow.
 
+**Works on your codebase, not just the demo.** Point Kraken at any repo from chat and the crew works on it, ending in a pull request a person approves:
+
+```
+@kraken connect https://github.com/your-team/your-api
+@kraken build your-api: add rate limiting to POST /login
+   … brief → bids → build + review → chaos test …
+[K-7] Storm survived. Open a pull request?   👍
+[K-7] pull request: https://github.com/your-team/your-api/pull/42
+```
+
 ## The pipeline
 
 ```
-#kraken-requests ─► SPARK ─► SONAR pre-flight ─► CHARTER ─► FORGE ─► STORM ─► close
-                     intake     conflict check     bidding    build    chaos test
-                                     ▲                                       │
+#kraken-requests ─► SPARK ─► SONAR pre-flight ─► CHARTER ─► FORGE ─► STORM ─► DELIVER ─► close
+                     intake     conflict check     bidding    build    chaos test  pull request
+                                     ▲                                       │      (human 👍)
                      SONAR (always listening across all rooms)      HALLMARK (decision ledger)
 ```
 
@@ -22,6 +32,7 @@ Built for the Flip the Switch hackathon (WeMakeDevs, Nov 4-7 2026), Track 01: Be
 | **Charter** | Bidding room. Several coding agents bid, one is picked, the losers become reviewers. |
 | **Forge** | Build room. The winner implements; reviewers push back until they post `ACCEPTED`. |
 | **Storm** | Chaos test of that change. **Auto** (attacker and defender agents), **Drill** (humans defend) or **Skip**. |
+| **Deliver** | A person approves, then the coder pushes the branch and opens a pull request with the brief, the reviews and the Storm scorecard. |
 | **Hallmark** | Decision ledger (SQLite), mirrored into a Switch room document. |
 
 Two entry points: a person asks for work in `#kraken-requests`, or Sonar finds a conflict on its own, opens a resolution room, and the answer goes straight to Charter.
@@ -114,11 +125,43 @@ Ask for work in `#kraken-requests`: `@kraken build password reset`. Every prompt
 | `storm skip` | ⏭️ | Skip Storm |
 | `not a conflict` | 🙅 | Dismiss a Sonar conflict; the pair is remembered |
 | `retry` | none | Retry a stage whose template run failed |
+| `agent` / `take over` / `you decide` | 🤖 | Hand the current step of this request to an agent (see [Human first](#human-first)) |
+| `me` / `I'll do it` | 🙋 | Take a handed-off step back |
 | `crew` | none | List the roster with each agent's vendor and whether it is online (requests room only) |
 | `enlist <name> [as <role>]` | none | Add a Switch agent to the crew; role defaults to `bidder` (requests room only) |
 | `retire <name>` | none | Remove an agent from the crew (requests room only) |
+| `connect <git url> [name]` | none | Clone a repo, detect how to test and run it, and add it as a project (requests room only) |
+| `projects` | none | List the connected projects and the default one (requests room only) |
+| `use <name>` | none | Make a project the default for new requests (requests room only) |
+| `project set <name> <field> <value>` | none | Fix a detected value, e.g. `project set api test npm run test:ci` (requests room only) |
 
 A leading `@kraken` and a trailing `.` or `!` are ignored.
+
+## Human first
+
+Every step is a person's by default. Hand one to an agent when you don't want to do it: reply 🤖 (or `agent`) in that step's room. It applies to that step of that request only; the next request starts human-first again. Reply 🙋 (or `me`) to take it back before the agent finishes.
+
+| Step | You do it (default) | 🤖 hands it to |
+|---|---|---|
+| **Spark** | The planner asks only what it can't work out from the request and the code (often nothing). You answer, then approve the brief | The planner: it decides the open answers itself and lists them as *Assumptions* in the brief |
+| **Charter** | You read the bids and pick one (1️⃣ 2️⃣ 3️⃣) | The judge: it picks the plan that best meets the acceptance criteria and records why |
+| **Forge** | Agents build and review; you give the merge OK | The reviewers: their `ACCEPTED` is enough |
+| **Storm** | Drill: Squall breaks things, you fix them, the coach scores you | `storm-defender`: it switches the round to auto and patches the faults |
+| **Pull request** | You approve it | Nobody: nothing leaves the chat without a person |
+
+Nobody waits forever: if no person replies to a step for `human_wait_s` (default 300 seconds), Kraken hands it to the agent itself and says so in the room. Any message from a person in the step's room restarts the clock; `human_wait_s: 0` always waits. The pull request is never handed off.
+
+Every handoff is announced in the room and recorded on the request (`handoff`, `handoff_by`). To hand a step to agents for every request, set its `autonomy` key to `auto`, or `storm.default_mode: auto`.
+
+## Use Kraken on your own repo
+
+1. **Connect it.** In `#kraken-requests`: `@kraken connect https://github.com/you/your-repo`. Kraken clones it into `workspace/<name>`, works out the language, the test command, how to run it, where the code and config files are, and posts a summary. Fix anything it got wrong: `@kraken project set your-repo run "npm run start:prod"`. From a terminal instead: `python -m kraken.init path/to/checkout --repo <url>` writes the same into `kraken.yaml`.
+2. **Ask for work.** `@kraken build your-repo: add input validation to POST /orders` (or just `@kraken build …` for the default project; `@kraken use your-repo` changes it).
+3. **Watch the rooms.** Every stage room carries a *Project* section: the repo, base branch, test and run commands. Each agent clones the repo into `projects/<name>` in its own folder and works on the branch `kraken/K-<n>`; reviewers run the tests.
+4. **Storm attacks it from outside.** With a `run` command Storm starts the app itself and injects faults without touching its code: kill and restart, latency and dropped connections through a proxy, malformed and oversized input (a 5xx is a bug), floods, corrupt config files, missing environment variables. Without one (a library or CLI) it runs the tests under the faults and compares with a clean run. `python -m storm.faults --project <file> --list` shows what applies.
+5. **Approve the pull request.** When Storm survives, Kraken asks *"Open a pull request?"* in the Storm room. Nothing leaves the chat without a person's 👍, whatever the autonomy settings. Then the coder pushes and opens the PR (through its own `gh` login) and Kraken posts the link. Set `deliver: branch` to keep work local instead.
+
+Works with Python (FastAPI, Flask, Django), Node (Express, Fastify, Nest, Koa, Hono), Go and Rust out of the box; anything else connects too, and `project set` fills in the commands. Sonar reads YAML, JSON, TOML, `.env.example`, OpenAPI, Python classes, TypeScript types and Go structs for chat-vs-code conflicts.
 
 ## Crew
 
@@ -158,10 +201,14 @@ At Charter, Kraken asks the bidders that are online. If more than `charter.max_b
 | Key | Default | Meaning |
 |---|---|---|
 | `sonar.threshold` | `0.75` | Minimum confidence to raise a conflict |
-| `sonar.code_paths` | `[]` (`[demo/shopfront]` in the repo file) | Paths indexed for chat-vs-code checks |
+| `projects` | `[]` (shopfront in the repo file) | Seed list of codebases: `name`, `repo`, `branch`, `description`, `code_paths`, `test`, `run`, `base_url`, `health`, `endpoints`, `config_files`, `chaos_endpoint`. More are added from chat and kept in `kraken.db` |
+| `default_project` | first project | Project used when a request doesn't name one |
+| `workspace` | `workspace` | Where Kraken clones connected repos |
+| `deliver` | `pr` | `pr`: after Storm, ask a person, then open a pull request; `branch`: leave work on the coder's branch |
+| `sonar.code_paths` | `[]` | Old single-codebase key; still read as a project named `default` |
 | `sonar.min_words` | `6` | Messages shorter than this are ignored |
 | `storm.max_rounds` | `3` | Storm-to-Forge loops before a human is pinged |
-| `storm.default_mode` | `auto` | `auto`, `drill` or `skip` |
+| `storm.default_mode` | `drill` | `drill` (people defend, 🤖 hands it to the defender), `auto` or `skip` |
 | `autonomy.brief` | `human` | `human` (reply `approve`) or `auto` |
 | `autonomy.pick` | `human` | `human` (reply `pick`) or `auto` (LLM judge picks the best bid) |
 | `autonomy.merge` | `human` | Gate after reviewers post `ACCEPTED` |
@@ -175,15 +222,15 @@ At Charter, Kraken asks the bidders that are online. If more than `charter.max_b
 | `agents.attacker` | `squall` | Initial seed for the attacker |
 | `agents.defender` | `storm-defender` | Initial seed for the defender |
 | `agents.coach` | `storm-coach` | Initial seed for the coach |
-| `timeouts_s.spark` / `charter` / `forge` / `storm` | `1800` / `900` / `3600` / `1800` | Per-stage timeout in seconds; on expiry Kraken pings the owner |
+| `timeouts_s.spark` / `charter` / `forge` / `storm` / `deliver` | `1800` / `900` / `3600` / `1800` / `3600` | Per-stage timeout in seconds; on expiry Kraken pings the owner |
 | `db_path` | `kraken.db` | SQLite file for claims, decisions and request state |
 | `relay_port` | `8765` | Local port for the reaction relay endpoint |
 
 ## Repo map
 
-- `kraken/` core service: `sonar/`, `hallmark/`, `conductor/`, `relay/`, `crew.py`, `switch_client.py`, `main.py`
+- `kraken/` core service: `sonar/`, `hallmark/`, `conductor/`, `relay/`, `crew.py`, `projects.py` (connected codebases), `init.py` (repo detection), `workspace.py` (clones), `switch_client.py`, `main.py`
 - `templates/` Switch room templates, one per stage plus `kraken-hq`
-- `storm/faults.py` fault toolkit (`python -m storm.faults kill|latency|bad_payload|flood|bad_config`)
+- `storm/` fault toolkit: `faults.py` (CLI), `project_faults.py` (faults for any project), `target.py` (starts and stops the app), `proxy.py` (network faults in front of it)
 - `demo/shopfront/` the tiny two-service app with seeded drift; `demo/seed_chat.md` the demo messages
 - `tests/` unit suite, with the golden set in `tests/golden/`
 - `docs/demo-script.md` and `docs/blog-draft.md` submission material

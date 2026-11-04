@@ -116,7 +116,39 @@ async def test_open_stage_unknown_stage():
 def test_inputs_spark():
     got = stage_inputs("spark", req(), Config())
     assert got == {"tag": "7", "request": "build password reset", "planner": "kraken-planner",
-                   "owner": "@sam", "kraken": "kraken"}
+                   "owner": "@sam", "kraken": "kraken",
+                   "project": "Project: not set. Work in your own checkout."}
+
+
+@pytest.mark.parametrize("stage", ["spark", "sonar-resolution", "charter", "forge", "storm"])
+def test_inputs_are_all_declared_by_the_template(stage):
+    # Switch refuses undeclared inputs ("Undeclared input(s): workdir" live, K-5)
+    import yaml
+    from kraken.conductor.stages import TEMPLATES_DIR
+    from kraken.config import ProjectConfig
+    p = ProjectConfig(name="api", repo="https://github.com/o/api", run="x", base_url="http://h")
+    extra = {"sonar-resolution": dict(subject="s", prompt_text="p", quote_a="a", link_a="l",
+                                      user_a="u", quote_b="b", link_b="l", user_b="u"),
+             "charter": {"bidders": ["codex-coder"]}, "forge": {"reviewers": ["codex-coder"]}}
+    got = stage_inputs(stage, req(), Config(), project=p, **extra.get(stage, {}))
+    declared = yaml.safe_load((TEMPLATES_DIR / f"{stage}.template.yaml").read_text(encoding="utf-8"))["params"]
+    assert set(got) <= set(declared), set(got) - set(declared)
+
+
+def test_project_block_for_a_connected_repo():
+    from kraken.config import ProjectConfig
+    from kraken.conductor.stages import project_block
+    p = ProjectConfig(name="api", repo="https://github.com/o/api", branch="dev", language="go",
+                      test="go test ./...", run="go run .", base_url="http://127.0.0.1:8085",
+                      health="/healthz", code_paths=["cmd"])
+    got = stage_inputs("forge", req(), Config(), project=p, reviewers=["codex-coder"])
+    block = got["project"]
+    assert got["workdir"] == "projects/api"
+    for part in ("Project: api", "git clone https://github.com/o/api projects/api",
+                 "origin/dev", "`go test ./...`", "`go run .`", "/healthz", "Code lives in: cmd"):
+        assert part in block, part
+    lib = project_block(ProjectConfig(name="lib"))
+    assert "your own checkout" in lib and "Tests: none known" in lib and "no server" in lib
 
 
 def test_inputs_charter_uses_live_bidders():
@@ -154,7 +186,19 @@ def test_inputs_storm():
     got = stage_inputs("storm", req(storm_mode="drill"), Config())
     assert got == {"tag": "7", "brief": "the brief", "diff_ref": "branch kraken/K-7",
                    "mode": "drill", "attacker": "squall", "defender": "storm-defender",
-                   "coach": "storm-coach", "kraken": "kraken"}
+                   "coach": "storm-coach", "kraken": "kraken", "workdir": ".",
+                   "project": "Project: not set. Work in your own checkout.", "project_file": "{}"}
+
+
+def test_storm_project_file_is_one_json_line():
+    import json
+    from kraken.config import ProjectConfig
+    p = ProjectConfig(name="api", repo="https://github.com/o/api", run="npm start",
+                      base_url="http://127.0.0.1:3000", endpoints=["/items/1"], root="workspace/api")
+    line = stage_inputs("storm", req(), Config(), project=p)["project_file"]
+    data = json.loads(line)
+    assert "\n" not in line and data["workdir"] == "projects/api" and data["run"] == "npm start"
+    assert "root" not in data and "description" not in data
 
 
 def test_extra_overrides_and_resolution_passthrough():

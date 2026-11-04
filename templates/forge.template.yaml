@@ -23,6 +23,17 @@ params:
     required: false
     label: Other reviewers as mentions
     description: The same names written as @mentions, for the kickoff.
+  project:
+    type: string
+    multiline: true
+    required: false
+    label: Project
+    description: The codebase, built by Kraken from the project's settings.
+  workdir:
+    type: string
+    required: false
+    default: "."
+    label: Working folder
   kraken:
     type: agent
     label: Kraken agent
@@ -37,15 +48,20 @@ room:
     and makes the commits. The reviewers are {reviewer_1} and, when present,
     {other_reviewers}.
 
+    {project}
+
     Brief:
     {brief}
 
-    Coder: post your plan in this room before your first commit, then implement
-    on the branch and post a short hand-off after each push.
+    Coder: in {workdir}, create the branch kraken/K-{tag}, post your plan in this
+    room before your first commit, then implement and commit on the branch. Run
+    the tests before each hand-off. Do not push until Kraken asks you to.
 
-    Reviewers: check every hand-off against the acceptance criteria in the
-    brief and push back until all are met. Only when every acceptance criterion
-    is met, end your message with the line ACCEPTED.
+    Reviewers: get the coder's branch into your own copy of {workdir} (fetch it
+    from the coder's clone if it is not pushed), run the tests, and check every
+    hand-off against the acceptance criteria in the brief. Push back until all
+    are met. Only when every acceptance criterion is met, end your message with
+    the line ACCEPTED.
 
     Marker rule: ACCEPTED goes on its own line, and only when every acceptance
     criterion is met. Never write it in a message that still lists open items.

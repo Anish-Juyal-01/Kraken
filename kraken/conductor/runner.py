@@ -9,6 +9,7 @@ from kraken.conductor.state import Action, stage_room
 from kraken.config import Config
 from kraken.crew import Crew, lookup, pick_bidders
 from kraken.hallmark.ledger import Ledger, Request
+from kraken.projects import Projects
 from kraken.switch_client import SwitchClient, SwitchError
 
 log = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class ActionRunner:
         self.cfg = cfg
         self._publish = publish
         self.crew = Crew(ledger)
+        self.projects = Projects(ledger)
 
     async def live_bidders(self) -> tuple[list[str], list[str]]:
         """(live, missing) from the crew's bidders. An agent is live when Switch reports
@@ -123,7 +125,8 @@ class ActionRunner:
             reviewers = [x for x in pool if x != req.winner]
             extra["reviewers"], invitees = reviewers, reviewers[1:]
         await self._connect_parent(req)
-        inputs = stage_inputs(stage, req, self.cfg, self.crew, **extra)
+        project = self.projects.get(req.data.get("project"))
+        inputs = stage_inputs(stage, req, self.cfg, self.crew, project=project, **extra)
         room_id = await open_stage(self.client, stage, inputs, self.cfg.people, self.cfg.bridge)
         self.ledger.bind_room(req.id, stage, room_id)
         merge_data(self.ledger, req.id, stage_started=time.time(), timed_out=None)

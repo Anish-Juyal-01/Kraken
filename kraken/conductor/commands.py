@@ -4,7 +4,8 @@ from typing import Literal
 from pydantic import BaseModel
 
 Kind = Literal["approve", "reject", "pick", "storm", "not_conflict", "retry",
-               "crew", "enlist", "retire"]
+               "crew", "enlist", "retire", "connect", "projects", "use", "project_set",
+               "handoff", "reclaim"]
 
 
 class Command(BaseModel):
@@ -13,6 +14,7 @@ class Command(BaseModel):
     tag: int | None = None
     user: str
     role: str | None = None
+    args: list[str] = []
 
 
 _EMOJI: dict[str, tuple[Kind, str | None]] = {
@@ -28,6 +30,8 @@ _EMOJI: dict[str, tuple[Kind, str | None]] = {
     "🧪": ("storm", "drill"),
     "⏭": ("storm", "skip"),
     "🙅": ("not_conflict", None),
+    "🤖": ("handoff", None),
+    "🙋": ("reclaim", None),
 }
 
 _STRIP = re.compile("[\ufe0f\U0001f3fb-\U0001f3ff]|\u200d[\u2642\u2640]")
@@ -45,6 +49,15 @@ _CREW = re.compile(r"crew\s*[.!]?", _F)
 _ENLIST = re.compile(
     r"enlist\s+([\w.-]+?)(?:\s+as\s+(bidder|planner|attacker|defender|coach))?\s*[.!]?", _F)
 _RETIRE = re.compile(r"retire\s+([\w.-]+?)\s*[.!]?", _F)
+# Project commands. Chat apps wrap pasted links as <url>; accept that form too.
+_CONNECT = re.compile(r"connect\s+<?((?:https://|git@)\S+?)>?(?:\s+(?:as\s+)?([\w.-]+))?\s*", _F)
+_PROJECTS = re.compile(r"projects\s*[.!?]?", _F)
+_USE = re.compile(r"use\s+([\w.-]+?)\s*[.!]?", _F)
+_PROJECT_SET = re.compile(r"project\s+set\s+([\w.-]+)\s+(\w+)\s+(.+)", _F | re.DOTALL)
+# Human first: hand the current step to an agent, or take it back.
+_HANDOFF = re.compile(r"(?:agent|take\s+over|agent,?\s+(?:do|take)\s+(?:it|this|over)"
+                      r"|you\s+(?:do|decide|pick|defend)(?:\s+it)?)\s*[.!]?", _F)
+_RECLAIM = re.compile(r"(?:me|i'?ll\s+do\s+it|i'?ll\s+(?:pick|defend|answer)|my\s+turn)\s*[.!]?", _F)
 
 
 def _normalize(emoji: str) -> str:
@@ -94,8 +107,24 @@ def parse(body: str, user: str) -> Command | None:
     m = _RETIRE.fullmatch(text)
     if m:
         return Command(kind="retire", arg=m.group(1), tag=tag, user=user)
+    m = _CONNECT.fullmatch(text)
+    if m:
+        return Command(kind="connect", arg=m.group(1), role=m.group(2), tag=tag, user=user)
+    if _PROJECTS.fullmatch(text):
+        return Command(kind="projects", tag=tag, user=user)
+    m = _USE.fullmatch(text)
+    if m:
+        return Command(kind="use", arg=m.group(1), tag=tag, user=user)
+    m = _PROJECT_SET.fullmatch(text)
+    if m:
+        return Command(kind="project_set", arg=m.group(1), args=[m.group(2), m.group(3).strip()],
+                       tag=tag, user=user)
     if _NOT_CONFLICT.fullmatch(text):
         return Command(kind="not_conflict", tag=tag, user=user)
+    if _HANDOFF.fullmatch(text):
+        return Command(kind="handoff", tag=tag, user=user)
+    if _RECLAIM.fullmatch(text):
+        return Command(kind="reclaim", tag=tag, user=user)
     if _RETRY.fullmatch(text):
         return Command(kind="retry", tag=tag, user=user)
     return None

@@ -6,7 +6,8 @@ from kraken.conductor.commands import Command, prompt
 from kraken.config import Config
 from kraken.hallmark.ledger import Request
 
-State = Literal["SPARK", "PREFLIGHT", "CHARTER", "FORGE", "STORM", "CLOSED", "RESOLVING"]
+State = Literal["SPARK", "PREFLIGHT", "CHARTER", "FORGE", "STORM", "DELIVER", "CLOSED",
+                "RESOLVING"]
 
 _APPROVE_REJECT = ["\U0001f44d approve", "\U0001f44e reject"]
 _KEYCAPS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣",
@@ -15,11 +16,13 @@ _GATE_KINDS = {"approve", "reject", "pick"}
 _STAGE_ROOMS = {"RESOLVING": "sonar-resolution"}
 _RETRYABLE = ("SPARK", "CHARTER", "FORGE", "STORM")
 _NO_REASON = "no reason given"
+_PR_QUESTION = "Storm survived. Open a pull request?"
 
 
 class Signal(BaseModel):
     kind: Literal["brief_posted", "preflight_clear", "preflight_conflicts", "bid", "bids_done",
-                  "accepted", "survived", "failed", "resolved", "timeout"]
+                  "accepted", "survived", "failed", "resolved", "timeout", "delivered",
+                  "deliver_failed"]
     data: dict = {}
 
 
@@ -174,14 +177,67 @@ def _publish(req):
             [Action(kind="publish_hallmark", room="origin"), _close(req)])
 
 
+def _after_storm(req, cfg):
+    if cfg.deliver != "pr":
+        return _publish(req)
+    # Pushing reaches outside the team's chat, so a person always approves it,
+    # whatever the autonomy settings say. Asked in the Storm room, where people already are,
+    # so a plain "approve" there finds the request.
+    return ({"state": "DELIVER", "data": _data(req, "deliver")},
+            [_post(prompt(req.id, _PR_QUESTION, _APPROVE_REJECT), "storm")])
+
+
 def _survived(req, cfg, inp):
     if cfg.autonomy["storm_result"] == "human":
         return _ask(req, "storm_result", "Storm survived. Accept?", _APPROVE_REJECT)
-    return _publish(req)
+    return _after_storm(req, cfg)
 
 
 def _storm_approved(req, cfg, inp):
-    return _publish(req)
+    return _after_storm(req, cfg)
+
+
+# DELIVER
+def _deliver_ask(req, cfg):
+    # Storm's defender commits its fixes in its own clone (live, K-5): bring them in first.
+    return (f"@{req.winner} [K-{req.id}] approved. First bring in any fixes from the Storm round: "
+            f"if {cfg.agents.defender} committed on kraken/K-{req.id} (the Storm scorecard names the "
+            "commits and the clone), fetch them from its clone and merge them, then rerun the tests. "
+            f"Then push the branch kraken/K-{req.id} and open a "
+            "pull request against the project's base branch. Give it a clear title and a body "
+            "with the brief, what the reviewers checked and the Storm scorecard (for example "
+            f"`gh pr create --base <base branch> --head kraken/K-{req.id} --title ... --body-file ...`). "
+            "Then reply with `PR: <url>` on its own line, or `PR FAILED: <reason>` if you can't.")
+
+
+def _deliver_approved(req, cfg, inp):
+    return {"data": {**_data(req), "delivering": True}}, [_post(_deliver_ask(req, cfg), "forge")]
+
+
+def _deliver_declined(req, cfg, inp):
+    upd, actions = _publish(req)
+    note = _post(f"[K-{req.id}] no pull request: the work stays on kraken/K-{req.id} in "
+                 f"{req.winner}'s clone")
+    note.room = "origin"
+    return upd, [note, *actions]
+
+
+def _delivered(req, cfg, inp):
+    url = _sig(inp).get("url", "")
+    upd = {"state": "CLOSED", "data": {**_data(req), "pr": url}}
+    return upd, [Action(kind="publish_hallmark", room="origin"),
+                 Action(kind="close", room="origin", text=f"[K-{req.id}] pull request: {url}")]
+
+
+def _deliver_failed(req, cfg, inp):
+    reason = _sig(inp).get("reason") or _NO_REASON
+    return {"data": _data(req)}, [_ping(req, f"the pull request failed: {reason} — reply retry")]
+
+
+def _deliver_retry(req, cfg, inp):
+    if req.data.get("delivering"):
+        return {}, [_post(_deliver_ask(req, cfg), "forge")]
+    return {}, [_post(prompt(req.id, _PR_QUESTION, _APPROVE_REJECT), "storm")]
 
 
 def _storm_failed(req, cfg, inp):
@@ -238,21 +294,42 @@ _TABLE: dict[tuple[str, str], tuple[str | None, Handler]] = {
     ("STORM", "approve"): ("storm_result", _storm_approved),
     ("STORM", "failed"): (None, _storm_failed),
     ("STORM", "reject"): ("storm_result", _storm_failed),
+    ("DELIVER", "approve"): ("deliver", _deliver_approved),
+    ("DELIVER", "reject"): ("deliver", _deliver_declined),
+    ("DELIVER", "delivered"): (None, _delivered),
+    ("DELIVER", "deliver_failed"): (None, _deliver_failed),
+    ("DELIVER", "retry"): (None, _deliver_retry),
     ("RESOLVING", "resolved"): (None, _resolved),
     ("RESOLVING", "not_conflict"): (None, _not_conflict),
 }
-for _s in ("SPARK", "PREFLIGHT", "CHARTER", "FORGE", "STORM", "RESOLVING"):
+for _s in ("SPARK", "PREFLIGHT", "CHARTER", "FORGE", "STORM", "DELIVER", "RESOLVING"):
     _TABLE[(_s, "storm")] = (None, _storm_cmd)
 for _s in _RETRYABLE:
     _TABLE[(_s, "retry")] = (None, _retry)
-for _s in ("SPARK", "FORGE", "STORM"):
+for _s in ("SPARK", "FORGE", "STORM", "DELIVER"):
     _TABLE[(_s, "timeout")] = (None, _timeout_ping)
+
+
+# Which autonomy gate each stage's human part is. Handing a stage to an agent (🤖) makes
+# that gate auto for this request only.
+STAGE_GATE = {"SPARK": "brief", "PREFLIGHT": "brief", "CHARTER": "pick", "FORGE": "merge",
+              "STORM": "storm_result"}
+
+
+def effective(cfg: Config, req: Request) -> Config:
+    """The config for this request: kraken.yaml, plus the steps its people handed off."""
+    handed = [s for s in req.data.get("handoff", []) if s in STAGE_GATE]
+    if not handed:
+        return cfg
+    return cfg.model_copy(update={"autonomy": {**cfg.autonomy,
+                                               **{STAGE_GATE[s]: "auto" for s in handed}}})
 
 
 def step(req: Request, cfg: Config, inp: Signal | Command) -> Result:
     """Pure transition: returns (ledger field updates, actions). Never mutates `req`."""
     if req.state == "CLOSED":
         return {}, []
+    cfg = effective(cfg, req)
     if isinstance(inp, Command) and inp.tag is not None and inp.tag != req.id:
         return _stale(req)
     entry = _TABLE.get((req.state, inp.kind))

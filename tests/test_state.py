@@ -34,16 +34,61 @@ def kinds(acts):
     return [a.kind for a in acts]
 
 
-def test_full_happy_path_auto():
-    cfg = cfg_with(autonomy=ALL_AUTO)
+_AUTO_RUN = [Signal(kind="brief_posted", data={"brief": "b"}), Signal(kind="preflight_clear"),
+             Signal(kind="bid", data={"agent": "codex-coder"}),
+             Signal(kind="bids_done", data={"judged_winner": "codex-coder"}),
+             Signal(kind="accepted"), Signal(kind="survived")]
+
+
+def test_full_happy_path_auto_ends_on_a_branch():
+    cfg = cfg_with(autonomy=ALL_AUTO, deliver="branch")
     r = req(state="SPARK")
-    seq = [Signal(kind="brief_posted", data={"brief": "b"}), Signal(kind="preflight_clear"),
-           Signal(kind="bid", data={"agent": "codex-coder"}),
-           Signal(kind="bids_done", data={"judged_winner": "codex-coder"}),
-           Signal(kind="accepted"), Signal(kind="survived")]
-    for s in seq:
+    for s in _AUTO_RUN:
         r = apply(r, *step(r, cfg, s))
     assert r.state == "CLOSED" and r.winner == "codex-coder"
+
+
+def test_full_auto_still_asks_a_person_before_a_pull_request():
+    cfg = cfg_with(autonomy=ALL_AUTO)  # deliver: pr is the default
+    r = req(state="SPARK")
+    for s in _AUTO_RUN:
+        r = apply(r, *step(r, cfg, s))
+    assert r.state == "DELIVER" and r.data["gate"] == "deliver"
+
+
+def test_deliver_approve_asks_the_coder_then_pr_link_closes():
+    r = gated("DELIVER", "deliver", winner="codex-coder")
+    upd, acts = step(r, Config(), cmd("approve"))
+    assert upd["data"]["delivering"] and "gate" not in upd["data"]
+    (ask,) = acts
+    assert ask.stage == "forge" and ask.text.startswith("@codex-coder [K-1] approved")
+    assert "kraken/K-1" in ask.text and "PR: <url>" in ask.text
+    # Storm's fixes live in the defender's clone (live K-5): the PR must include them
+    assert "storm-defender" in ask.text and ask.text.index("fixes") < ask.text.index("push the branch")
+    r = apply(r, *(upd, acts))
+    upd, acts = step(r, Config(), Signal(kind="delivered", data={"url": "https://gh/o/r/pull/9"}))
+    assert upd["state"] == "CLOSED" and upd["data"]["pr"] == "https://gh/o/r/pull/9"
+    assert kinds(acts) == ["publish_hallmark", "close"] and "pull/9" in acts[1].text
+
+
+def test_deliver_reject_closes_without_a_pull_request():
+    upd, acts = step(gated("DELIVER", "deliver", winner="c"), Config(), cmd("reject"))
+    assert upd["state"] == "CLOSED" and "no pull request" in acts[0].text
+    assert acts[0].room == "origin" and kinds(acts)[1:] == ["publish_hallmark", "close"]
+
+
+def test_deliver_failure_pings_and_retry_reasks():
+    r = req(state="DELIVER", winner="c", data={"delivering": True})
+    upd, acts = step(r, Config(), Signal(kind="deliver_failed", data={"reason": "no gh auth"}))
+    assert kinds(acts) == ["ping_owner"] and "no gh auth" in acts[0].text
+    upd, acts = step(r, Config(), cmd("retry"))
+    assert acts[0].stage == "forge" and "push the branch" in acts[0].text
+
+
+def test_survived_with_pr_delivery_asks_in_the_storm_room():
+    upd, acts = step(req(state="STORM"), cfg_with(autonomy=ALL_AUTO), Signal(kind="survived"))
+    assert upd["state"] == "DELIVER" and upd["data"]["gate"] == "deliver"
+    assert acts[0].stage == "storm" and "Open a pull request?" in acts[0].text
 
 
 def test_storm_fail_loops_then_pings_owner():
@@ -210,12 +255,15 @@ def test_storm_survived_human_then_approve():
     upd, acts = step(req(state="STORM"), Config(), Signal(kind="survived"))
     assert upd["data"]["gate"] == "storm_result" and "state" not in upd
     assert acts[0].text.startswith("[K-1] Storm survived. Accept?")
-    upd, acts = step(gated("STORM", "storm_result"), Config(), cmd("approve"))
+    upd, acts = step(gated("STORM", "storm_result"), Config(deliver="branch"), cmd("approve"))
     assert upd["state"] == "CLOSED" and kinds(acts) == ["publish_hallmark", "close"]
+    upd, _ = step(gated("STORM", "storm_result"), Config(), cmd("approve"))
+    assert upd["state"] == "DELIVER"
 
 
 def test_storm_survived_auto():
-    upd, acts = step(req(state="STORM"), cfg_with(autonomy=ALL_AUTO), Signal(kind="survived"))
+    upd, acts = step(req(state="STORM"), cfg_with(autonomy=ALL_AUTO, deliver="branch"),
+                     Signal(kind="survived"))
     assert upd["state"] == "CLOSED" and kinds(acts) == ["publish_hallmark", "close"]
 
 

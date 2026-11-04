@@ -11,6 +11,7 @@ from kraken.crew import Crew
 from kraken.dispatch import Dispatcher
 from kraken.hallmark.ledger import Ledger
 from kraken.llm import make_llm
+from kraken.projects import Projects
 from kraken.relay.server import make_app
 from kraken.sonar.code_check import index_code
 from kraken.switch_client import SwitchClient
@@ -75,10 +76,13 @@ async def main() -> None:
     cfg = load_config()
     ledger = Ledger(cfg.db_path)
     Crew(ledger).seed(cfg)  # kraken.yaml's agent lists only seed the roster, once
+    projects = Projects(ledger)
+    projects.seed(cfg)  # kraken.yaml projects; more arrive from chat (@kraken connect)
     client = SwitchClient(os.environ["SWITCH_URL"], os.environ["SWITCH_AGENT_ID"],
                           os.environ["SWITCH_API_KEY"], connection_id(ledger))
-    code_index = index_code(cfg.sonar.code_paths)
-    log.info("indexed %d code claims", len(code_index))
+    code_index = [c for p in projects.all().values() for c in index_code(p.index_paths())]
+    log.info("projects: %s (default %s); indexed %d code claims",
+             ", ".join(projects.all()) or "none", projects.default_name(), len(code_index))
     # Switch gives the agent's own participant id as its agent id.
     llm = make_llm()
     log.info("LLM backend: %s", type(llm).__name__)

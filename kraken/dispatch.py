@@ -3,19 +3,23 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 
 from pydantic import BaseModel
 
 from kraken.conductor.commands import Command, from_reaction, parse, prompt
 from kraken.conductor.runner import ActionRunner, merge_data
-from kraken.conductor.state import Action, Signal, stage_room, step
-from kraken.config import Config
+from kraken.conductor.state import STAGE_GATE, Action, Signal, effective, stage_room, step
+from kraken.config import Config, ProjectConfig
 from kraken.crew import lookup, render_roster
 from kraken.hallmark.ledger import Ledger, Request
 from kraken.hallmark.publish import publish
+from kraken.init import detect as detect_project
 from kraken.llm import LLM, SMART, LLMParseError
 from kraken.models import Claim, Conflict, Event
-from kraken.sonar.code_check import code_claims_for
+from kraken.projects import render_project
+from kraken.sonar.code_check import code_claims_for, index_code
+from kraken.workspace import GitError, checkout, project_name
 from kraken.sonar.detect import detect, judge, norm_value
 from kraken.sonar.extract import extract
 from kraken.sonar.normalize import normalize
@@ -24,11 +28,15 @@ from kraken.switch_client import SwitchClient, SwitchError
 
 log = logging.getLogger(__name__)
 
-_TIMED_STAGES = ("SPARK", "CHARTER", "FORGE", "STORM")
+_TIMED_STAGES = ("SPARK", "CHARTER", "FORGE", "STORM", "DELIVER")
 _MENTION = re.compile(r"^@kraken\b[:,]?\s*", re.IGNORECASE)
 _RESOLVE_HINT = "reply 1️⃣, 2️⃣ or 🙅"
 _QUOTE_MAX = 300
 _CREW_KINDS = ("crew", "enlist", "retire")
+_PROJECT_KINDS = ("connect", "projects", "use", "project_set")
+_STAGE_NAMES = {"SPARK": "Spark (answers and brief)", "CHARTER": "Charter (picking the plan)",
+                "FORGE": "Forge (merge OK)", "STORM": "Storm (defending)"}
+_NAMED_PROJECT = re.compile(r"^(?:build\s+)?([\w.-]+)\s*:\s+(.+)$", re.IGNORECASE | re.DOTALL)
 # Status lines Switch posts on an agent's behalf. They look like ordinary messages (an
 # offline notice even starts with "@kraken"), so match the text: live, one became request K-4.
 _SWITCH_NOTICE = re.compile(
@@ -72,7 +80,9 @@ class Dispatcher:
         self._room_names: dict[str, str] = {}  # room id -> name, from list_rooms
         self.runner = ActionRunner(client, ledger, cfg, lambda: self.on_decision())
         self.crew = self.runner.crew
+        self.projects = self.runner.projects
         self._lock = asyncio.Lock()
+        self._tasks: set[asyncio.Task] = set()  # background work such as cloning a repo
 
     @property
     def _agent_names(self) -> set[str]:
@@ -129,8 +139,79 @@ class Dispatcher:
                 log.exception("reaction receipt for K-%s failed", tag)
             return await self._command(cmd, None)
 
+    def _waiting_on_people(self, req: Request) -> bool:
+        """True while this request's current step needs a person who hasn't acted yet."""
+        if req.state not in _STAGE_NAMES or req.state in req.data.get("handoff", []):
+            return False
+        gate = req.data.get("gate")
+        if req.state == "SPARK":
+            return gate in (None, "brief")  # answering the planner, or approving the brief
+        if req.state == "STORM" and req.storm_mode == "drill" and "storm" in req.rooms:
+            return gate in (None, "storm_result")
+        return gate is not None and gate == STAGE_GATE.get(req.state)
+
+    async def _auto_handoffs(self, now: float) -> None:
+        """Human first, but nobody waits forever: after human_wait_s with no reply from a
+        person, hand the step to its agent, as if someone had replied 🤖."""
+        wait = self.cfg.human_wait_s
+        if wait <= 0:
+            return
+        for req in self.ledger.open_requests():
+            if not self._waiting_on_people(req):
+                continue
+            marks = [req.data[k] for k in ("stage_started", "gate_since", "human_at")
+                     if req.data.get(k) is not None]
+            if marks and now - max(marks) > wait:
+                who = f"Kraken (no reply from a person in {round(wait / 60)} min)"
+                try:
+                    await self._handoff(req, Command(kind="handoff", tag=req.id, user=who))
+                except Exception:
+                    log.exception("auto handoff failed for K-%s", req.id)
+
+    def _waited_on_agents(self, req: Request) -> tuple[str, list[str]] | None:
+        """(stage room, agents Kraken is waiting on) while agents should be working."""
+        if req.data.get("gate") or self._waiting_on_people(req):
+            return None
+        if req.state == "CHARTER":
+            bid = {b["agent"] for b in req.bids}
+            return "charter", [a for a in req.data.get("live_bidders", []) if a not in bid]
+        if req.state == "FORGE" and req.winner:
+            return "forge", [req.winner]
+        if req.state == "STORM":
+            return "storm", [n for n in (self.crew.primary(r) for r in ("attacker", "defender", "coach")) if n]
+        if req.state == "SPARK":
+            return "spark", [n for n in [self.crew.primary("planner")] if n]
+        if req.state == "DELIVER" and req.data.get("delivering") and req.winner:
+            return "forge", [req.winner]
+        return None
+
+    async def _nudge_quiet_agents(self, now: float) -> None:
+        quiet = self.cfg.agent_quiet_s
+        if quiet <= 0:
+            return
+        for req in self.ledger.open_requests():
+            waited = self._waited_on_agents(req)
+            if not waited or not waited[1] or waited[0] not in req.rooms:
+                continue
+            marks = [req.data[k] for k in ("stage_started", "active_at", "nudged_at")
+                     if req.data.get(k) is not None]
+            if not marks or now - max(marks) <= quiet:
+                continue
+            room, agents = waited
+            merge_data(self.ledger, req.id, nudged_at=now)
+            mentions = " ".join(f"@{a}" for a in agents)
+            try:
+                await self.runner.say(
+                    req, f"{mentions} [K-{req.id}] it's been quiet here for "
+                    f"{round((now - max(marks)) / 60)} min. Where are you? Carry on from where you "
+                    "left off, and when you hand off, post it here and mention the next agent.", room)
+            except Exception:
+                log.exception("nudge for K-%s failed", req.id)
+
     async def tick(self, now: float) -> None:
         async with self._lock:
+            await self._auto_handoffs(now)
+            await self._nudge_quiet_agents(now)
             for req in self.ledger.open_requests():
                 started = req.data.get("stage_started")
                 if (req.state not in _TIMED_STAGES or started is None
@@ -176,10 +257,17 @@ class Dispatcher:
             self.ledger.set_meta(f"seen:{p['message_id']}", "1")
         name = p.get("sender_name") or p.get("sender") or ""
         known_agent = name in self._agent_names
+        if (rid := self.ledger.request_for_room(ev.room_id)) is not None:
+            merge_data(self.ledger, rid, active_at=time.time())  # someone is working here
+            if not known_agent:
+                merge_data(self.ledger, rid, human_at=time.time())  # a person: reset the wait
         cmd = None if known_agent else parse(body, user=name)
-        if cmd is not None and cmd.kind in _CREW_KINDS:
+        if cmd is not None and cmd.kind in (*_CREW_KINDS, *_PROJECT_KINDS):
             if ev.room_id != self.room_ids.get(self.cfg.rooms.requests):
-                cmd = None  # crew commands only work in the requests room
+                cmd = None  # crew and project commands only work in the requests room
+            elif cmd.kind in _PROJECT_KINDS:
+                await self._project_command(cmd, ev.room_id)
+                return
             else:
                 await self._crew_command(cmd, ev.room_id)
                 return
@@ -197,10 +285,71 @@ class Dispatcher:
 
     async def _new_request(self, ev: Event, name: str, body: str) -> None:
         text = _MENTION.sub("", body).strip() or body
+        project = self.projects.get()
+        m = _NAMED_PROJECT.match(text)
+        if m and self.projects.get(m.group(1)) is not None:  # "build <project>: <what>"
+            project, text = self.projects.get(m.group(1)), m.group(2).strip()
+        if project is None:
+            await self.client.send(ev.room_id, "No project is connected yet. Start with "
+                                   "`@kraken connect https://github.com/<owner>/<repo>`.")
+            return
         rid = self.ledger.new_request(owner=name, text=text, origin_room=ev.room_id,
                                       storm_mode=self.cfg.storm.default_mode)
+        merge_data(self.ledger, rid, project=project.name)
         await self.runner.run(self.ledger.get_request(rid),
                               [Action(kind="open_stage", stage="spark")])
+
+    # ---- project commands ----------------------------------------------
+    async def _project_command(self, cmd: Command, room_id: str) -> None:
+        if cmd.kind == "connect":
+            # cloning can take minutes: do it outside the event lock
+            task = asyncio.create_task(self._connect(cmd.arg or "", cmd.role, room_id))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            return
+        if cmd.kind == "projects":
+            default = self.projects.default_name()
+            listed = self.projects.all()
+            text = ("\n\n".join(render_project(p, p.name == default) for p in listed.values())
+                    or "No projects yet. `@kraken connect <repo url>` adds one.")
+        elif cmd.kind == "use":
+            ok = self.projects.use(cmd.arg or "")
+            text = f"Default project is now {cmd.arg}." if ok else f"No project named {cmd.arg}."
+        else:  # project set <name> <field> <value>
+            field, value = cmd.args
+            try:
+                p = self.projects.set_field(cmd.arg or "", field, value)
+                text = f"Updated {p.name}.{field}.\n" + render_project(p)
+            except KeyError:
+                text = f"No project named {cmd.arg}."
+            except ValueError as err:
+                text = f"Can't set that: {err}"
+        await self.client.send(room_id, text)
+
+    async def _connect(self, url: str, name: str | None, room_id: str) -> None:
+        name = name or project_name(url)
+        try:
+            await self.client.send(room_id, f"Cloning {url} as **{name}**…")
+            dest = await checkout(url, Path(self.cfg.workspace) / name)
+            project = detect_project(dest, name=name, repo=url)
+            self.projects.put(project)
+            self.index_project(project)
+            default = self.projects.default_name() == name
+            await self.client.send(
+                room_id, f"Connected.\n{render_project(project, default)}\n\nFix anything wrong "
+                f"with `@kraken project set {name} <field> <value>`; then ask "
+                f"`@kraken build {name}: <what you need>`.")
+        except GitError as err:
+            await self.client.send(room_id, f"Couldn't connect {url}: {err}")
+        except Exception as err:  # never let a bad repo take Kraken down
+            log.exception("connect %s failed", url)
+            await self.client.send(room_id, f"Couldn't connect {url}: {type(err).__name__}: {err}")
+
+    def index_project(self, project: ProjectConfig) -> None:
+        """(Re)index one project's code for Sonar, replacing its earlier claims."""
+        root = Path(project.root).as_posix().rstrip("/") + "/"
+        keep = [c for c in self.code_index if not (c.path or "").startswith(root)]
+        self.code_index[:] = keep + index_code(project.index_paths())
 
     # ---- crew commands --------------------------------------------------
     async def _crew_command(self, cmd: Command, room_id: str) -> None:
@@ -242,7 +391,9 @@ class Dispatcher:
             req = self.ledger.get_request(rid)
         except KeyError:
             return False
-        if req.state == "RESOLVING":
+        if cmd.kind in ("handoff", "reclaim"):
+            await self._handoff(req, cmd)
+        elif req.state == "RESOLVING":
             await self._resolving(req, cmd)
         elif req.state == "PREFLIGHT" and cmd.kind == "retry":
             await self._preflight(req)
@@ -274,6 +425,58 @@ class Dispatcher:
         else:
             await self.runner.say(req, f"[K-{req.id}] {_RESOLVE_HINT}", "sonar-resolution")
 
+    # ---- human first: hand a step to an agent, or take it back -------------
+    async def _handoff(self, req: Request, cmd: Command) -> None:
+        stage = req.state
+        room = stage_room(stage)
+        name = _STAGE_NAMES.get(stage)
+        if name is None:
+            why = ("The pull request always needs a person: reply approve or reject."
+                   if stage == "DELIVER" else "That step needs a person.")
+            await self.runner.say(req, f"[K-{req.id}] {why}", room)
+            return
+        handed = list(req.data.get("handoff", []))
+        if cmd.kind == "reclaim":
+            if stage not in handed:
+                await self.runner.say(req, f"[K-{req.id}] {name} is already yours.", room)
+                return
+            handed.remove(stage)
+            merge_data(self.ledger, req.id, handoff=handed)
+            text = f"[K-{req.id}] {name}: back with {cmd.user}."
+            if stage == "STORM":
+                self.ledger.update_request(req.id, storm_mode="drill")
+                text += (f" @{self.crew.primary('defender')} back to drill mode: hints only, "
+                         "the people defend.")
+            await self.runner.say(req, text, room)
+            return
+        if stage in handed:
+            await self.runner.say(req, f"[K-{req.id}] {name} is already with the agent.", room)
+            return
+        merge_data(self.ledger, req.id, handoff=[*handed, stage],
+                   handoff_by={**req.data.get("handoff_by", {}), stage: cmd.user})
+        await self.runner.say(req, f"[K-{req.id}] {name}: handed to the agent by {cmd.user}. "
+                                   "Reply 🙋 or `me` to take it back.", room)
+        req = self.ledger.get_request(req.id)
+        gate = req.data.get("gate")
+        by = f"{cmd.user} (handed to agent)"
+        if stage == "SPARK" and gate != "brief":
+            await self.runner.say(
+                req, f"@{self.crew.primary('planner')} [K-{req.id}] {cmd.user} handed this step "
+                "to you: stop waiting for answers, decide them yourself, list them under "
+                "Assumptions in the brief, then write it.", "spark")
+        elif stage == "CHARTER" and gate == "pick":
+            await self.apply(req.id, Signal(kind="bids_done", data=await self._bids_done_data(req)))
+        elif stage == "STORM":
+            self.ledger.update_request(req.id, storm_mode="auto")
+            if gate != "storm_result":
+                await self.runner.say(
+                    req, f"@{self.crew.primary('defender')} [K-{req.id}] {cmd.user} handed "
+                    "defending to you: you are in auto mode now. Fix what the faults broke, "
+                    f"commit, then post your verdict and mention @{self.crew.primary('coach')}.",
+                    "storm")
+        if gate in ("brief", "merge", "storm_result") and STAGE_GATE.get(stage) == gate:
+            await self.apply(req.id, Command(kind="approve", tag=req.id, user=by))
+
     async def _close_siblings(self, req: Request, c: Claim) -> None:
         """Settling one resolution settles every other open one on the same subject (R21)."""
         for other in self.ledger.open_requests():
@@ -296,6 +499,9 @@ class Dispatcher:
         new = self.ledger.get_request(rid)
         if new.state != req.state:
             merge_data(self.ledger, rid, stage_started=time.time(), timed_out=None)
+            new = self.ledger.get_request(rid)
+        if new.data.get("gate") and new.data.get("gate") != req.data.get("gate"):
+            merge_data(self.ledger, rid, gate_since=time.time())  # the human wait starts now
             new = self.ledger.get_request(rid)
         await self.runner.run(new, actions)
         if new.state == "PREFLIGHT" and req.state != "PREFLIGHT":
@@ -344,6 +550,14 @@ class Dispatcher:
         elif (stage == "forge" and sender in live and sender != req.winner
               and "ACCEPTED" in lines):
             await self.apply(rid, Signal(kind="accepted"))
+        elif stage == "forge" and req.state == "DELIVER" and sender == req.winner and (
+                pr := next((ln for ln in lines if ln.startswith(("PR:", "PR FAILED:"))), None)):
+            if pr.startswith("PR FAILED:"):
+                reason = pr.removeprefix("PR FAILED:").strip()
+                await self.apply(rid, Signal(kind="deliver_failed", data={"reason": reason}))
+            else:
+                url = pr.removeprefix("PR:").strip().strip("<>")
+                await self.apply(rid, Signal(kind="delivered", data={"url": url}))
         elif stage == "storm" and sender == self.crew.primary("coach") and (
                 "SURVIVED" in lines or "FAILED" in lines):
             if "SURVIVED" in lines:
@@ -368,7 +582,7 @@ class Dispatcher:
         await self.apply(req.id, Signal(kind="brief_posted", data={"brief": brief}))
 
     async def _bids_done_data(self, req: Request) -> dict:
-        if self.cfg.autonomy["pick"] != "auto" or not req.bids:
+        if effective(self.cfg, req).autonomy["pick"] != "auto" or not req.bids:
             return {}
         bids = "\n\n".join(f"{i}. {b['agent']}:\n{b.get('text', '')}"
                            for i, b in enumerate(req.bids, 1))

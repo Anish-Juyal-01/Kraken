@@ -1,10 +1,34 @@
 sonar:
   threshold: 0.75
-  code_paths: [demo/shopfront]
   min_words: 6
+# The codebases Kraken works on. Add your own with `python -m kraken.init <path>`, or from
+# chat: `@kraken connect https://github.com/you/your-repo`. The first one is the default.
+projects:
+  - name: shopfront
+    description: Demo shop API (users, free-tier rate limits) bundled with Kraken
+    language: python
+    # repo left out: the crew's own Kraken checkout already contains demo/shopfront
+    code_paths: [demo/shopfront]
+    test: python -m pytest tests/test_shopfront.py
+    run: python demo/shopfront/run.py
+    base_url: http://127.0.0.1:8080
+    health: /v2/users/1
+    endpoints: [/v1/users/1, /v2/users/1]
+    config_files: [demo/shopfront/config/limits.yaml]
+    chaos_endpoint: /__chaos
+# After Storm survives: pr = ask, then the coder pushes and opens a pull request;
+# branch = leave the work on the coder's local branch.
+deliver: pr
 storm:
   max_rounds: 3
-  default_mode: auto
+  # drill: you defend what Squall breaks; reply 🤖 in the Storm room to hand it to the defender
+  default_mode: drill
+# Human first: a person does each step; reply 🤖 (or "agent") in that step's room to hand
+# just that step of just that request to an agent, and "me" to take it back.
+# Set a key to auto to hand that step to agents for every request.
+# If no person replies for human_wait_s, Kraken hands the step to the agent itself
+# (0 = always wait). The pull request is never handed off.
+human_wait_s: 300
 autonomy:
   brief: human
   pick: human

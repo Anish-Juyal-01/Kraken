@@ -15,6 +15,12 @@ params:
   owner:
     type: string
     label: Request owner
+  project:
+    type: string
+    multiline: true
+    required: false
+    label: Project
+    description: The codebase, built by Kraken from the project's settings.
   kraken:
     type: agent
     label: Kraken agent
@@ -27,14 +33,23 @@ room:
   instructions: |
     This room turns request [K-{tag}] from {owner} into a brief that coders can bid on.
 
+    {project}
+
+    Look at the code before you write the brief, so the acceptance criteria name
+    real files, commands and behaviour.
+
     Request:
     {request}
 
     {planner} is the planner. Work in this order:
-    1. Ask at most 3 clarifying questions, all in one message. If the request is
-       already clear, ask none.
-    2. When the answers are in, write the brief: goal, acceptance criteria (a
-       numbered list a reviewer can tick off), files likely touched, and out of scope.
+    1. Decide whether anything must be asked. Ask only what you cannot settle
+       from the request and the code and what would change what gets built (no
+       fixed number, no checklist). If nothing is needed, ask nothing and go to 2.
+       If something is, ask {owner} in one message and wait: {owner} answers here.
+       If Kraken says the owner handed this step to you, stop waiting: choose the
+       answers yourself, sensibly, and list them under "Assumptions" in the brief.
+    2. Write the brief: goal, acceptance criteria (a numbered list a reviewer can
+       tick off), files likely touched, assumptions, and out of scope.
     3. Create the brief as a room document named brief (create_room_document), so
        the full text lives in the room.
     4. Then post one message containing the marker line BRIEF READY.
@@ -46,4 +61,6 @@ kickoff: |
 
   {request}
 
-  Start with your clarifying questions (at most 3, in one message).
+  Read the code, then either ask {owner} only what you truly need to know, or,
+  if the request is clear, write the brief straight away.
+  ({owner}: answer here, or reply 🤖 to let the planner decide.)

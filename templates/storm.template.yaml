@@ -28,6 +28,23 @@ params:
     type: agent
     label: Coach
     default: storm-coach
+  project:
+    type: string
+    multiline: true
+    required: false
+    label: Project
+    description: The codebase, built by Kraken from the project's settings.
+  workdir:
+    type: string
+    required: false
+    default: "."
+    label: Working folder
+  project_file:
+    type: string
+    required: false
+    default: "{}"
+    label: Project file for storm.faults
+    description: One line of JSON that storm.faults reads with --project.
   kraken:
     type: agent
     label: Kraken agent
@@ -41,19 +58,34 @@ room:
     This room stress-tests the change for request [K-{tag}]: {diff_ref}.
     This round runs in {mode} mode.
 
+    {project}
+
     Brief:
     {brief}
 
-    Attacker ({attacker}): pick exactly 3 faults and inject them one at a time
-    with python -m storm.faults <name>. Post each fault name and what broke.
+    Fault toolkit: storm.faults lives in your own Kraken checkout (run it from
+    that checkout's root). Save this one line as storm-project.json there:
+    {project_file}
+    Check out the branch kraken/K-{tag} in {workdir} first (fetch it from the
+    coder's clone if it is not pushed). Then
+    `python -m storm.faults --project storm-project.json --list` shows the faults
+    that fit this project; run one with
+    `python -m storm.faults <fault> --project storm-project.json`. It starts the
+    app itself when it needs to, and every fault restores what it changed.
+
+    Attacker ({attacker}): pick exactly 3 faults from that list, aimed at the
+    changed code, and inject them one at a time. Post each fault name and what
+    broke.
     When all 3 are done, post a summary that mentions @{defender} and @{coach}.
 
     Defender ({defender}):
     - auto mode: fix every failure the faults expose, commit the fix to the
       branch, and say what you changed.
-    - drill mode: do not change code. Give hints only, so the team can practise
-      the fix themselves.
-    When you have answered every fault, post your verdict and mention @{coach}.
+    - drill mode: the people in this room defend. Do not change code; give
+      hints only when asked, so they practise the fix themselves. If Kraken says
+      a person handed defending to you, switch to auto mode from then on.
+    When you have answered every fault (or, in drill mode, when the people say
+    they are done), post your verdict and mention @{coach}.
 
     Coach ({coach}): after the 3 faults and the defender's verdict, judge the
     round. End with a line that is exactly SURVIVED if the change held up, or
@@ -70,3 +102,5 @@ kickoff: |
   @{attacker}: pick 3 faults and start injecting them.
   @{defender}: respond to each fault as the room instructions say for this mode.
   @{coach}: watch the round and end it with SURVIVED or FAILED.
+  In drill mode you defend: fix what breaks, then tell the coach you're done.
+  Reply 🤖 to hand defending to {defender}.

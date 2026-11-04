@@ -87,7 +87,19 @@ def test_kraken_hq_group():
 
 
 def test_spark_params():
-    assert set(load("spark")["params"]) == {"tag", "request", "planner", "owner", "kraken"}
+    assert set(load("spark")["params"]) == {"tag", "request", "planner", "owner", "kraken", "project"}
+
+
+@pytest.mark.parametrize("name", ["spark", "charter", "forge", "storm"])
+def test_stage_rooms_carry_the_project_not_shopfront(name):
+    text = (TEMPLATES / f"{name}.template.yaml").read_text(encoding="utf-8")
+    assert "{project}" in text and "shopfront" not in text.lower()
+
+
+def test_crew_instructions_are_not_tied_to_one_app():
+    agents = yaml.safe_load((TEMPLATES / "kraken-crew.template.yaml").read_text(encoding="utf-8"))["agents"]
+    for a in agents:
+        assert "shopfront" not in a["instructions"].lower(), a["name"]
     assert "3" in load("spark")["room"]["instructions"]
 
 

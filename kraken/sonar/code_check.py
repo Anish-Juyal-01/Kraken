@@ -1,6 +1,8 @@
 import ast
 import json
 import logging
+import re
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -10,8 +12,17 @@ from kraken.sonar.extract import canonical
 
 log = logging.getLogger(__name__)
 
-_SKIP_DIRS = {".venv", "__pycache__", "node_modules", ".git"}
-_SUFFIXES = {".yaml", ".yml", ".json", ".py"}
+_SKIP_DIRS = {".venv", "venv", "__pycache__", "node_modules", ".git", "dist", "build", "target",
+              "vendor", ".next", "coverage", ".tox"}
+_SUFFIXES = {".yaml", ".yml", ".json", ".py", ".toml", ".ts", ".tsx", ".go"}
+_MAX_BYTES = 512 * 1024  # generated or vendored blobs are not decisions
+_SKIP_FILES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Cargo.lock"}
+# TypeScript: `interface User { id: string; ... }` and `type User = { id: string }`
+_TS_BLOCK = re.compile(r"(?:interface\s+\w+[^{]*|type\s+\w+\s*=\s*)\{([^{}]*)\}", re.S)
+_TS_FIELD = re.compile(r"^\s*(?:readonly\s+)?(\w+)\??\s*:\s*([^;,\n]+)", re.M)
+# Go: `type User struct { ID string `json:"id"` }`
+_GO_STRUCT = re.compile(r"type\s+\w+\s+struct\s*\{([^}]*)\}", re.S)
+_GO_FIELD = re.compile(r"^\s*(\w+)\s+([\w.*\[\]]+)(?:\s+`[^`]*json:\"(\w+)[^`]*`)?", re.M)
 
 
 def _claim(subject: str, attribute: str, value: str, path: str, line: int | None) -> Claim:
@@ -94,6 +105,46 @@ def _index_python(text: str, path: str) -> list[Claim]:
     return out
 
 
+def _line_of(text: str, offset: int) -> int:
+    return text.count("\n", 0, offset) + 1
+
+
+def _index_toml(text: str, path: str) -> list[Claim]:
+    return [_claim(canonical(k), "value", _scalar(v), path, None)
+            for k, v, _ in _leaves(tomllib.loads(text))]
+
+
+def _index_env_example(text: str, path: str) -> list[Claim]:
+    out = []
+    for n, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            if value.strip():  # an empty example value states nothing
+                out.append(_claim(canonical(key.removeprefix("export ").strip()), "value",
+                                  value.strip().strip("'\""), path, n))
+    return out
+
+
+def _index_typescript(text: str, path: str) -> list[Claim]:
+    out = []
+    for block in _TS_BLOCK.finditer(text):
+        for field in _TS_FIELD.finditer(block.group(1)):
+            line = _line_of(text, block.start(1) + field.start())
+            out.append(_claim(canonical(field.group(1)), "type", field.group(2).strip(), path, line))
+    return out
+
+
+def _index_go(text: str, path: str) -> list[Claim]:
+    out = []
+    for block in _GO_STRUCT.finditer(text):
+        for field in _GO_FIELD.finditer(block.group(1)):
+            name = field.group(3) or field.group(1)  # the JSON name is what other code sees
+            line = _line_of(text, block.start(1) + field.start())
+            out.append(_claim(canonical(name), "type", field.group(2), path, line))
+    return out
+
+
 def _files(paths: list[str]):
     for raw in paths:
         p = Path(raw)
@@ -109,15 +160,26 @@ def index_code(paths: list[str]) -> list[Claim]:
     out: list[Claim] = []
     for f in _files(paths):
         suffix = f.suffix.lower()
-        if suffix not in _SUFFIXES:
+        env_example = f.name == ".env.example"
+        if (suffix not in _SUFFIXES and not env_example) or f.name in _SKIP_FILES:
             continue
         shown = f.as_posix()
         try:
+            if f.stat().st_size > _MAX_BYTES:
+                continue
             text = f.read_text(encoding="utf-8")
-            if suffix == ".json":
+            if env_example:
+                out += _index_env_example(text, shown)
+            elif suffix == ".json":
                 out += _index_json(text, shown)
             elif suffix == ".py":
                 out += _index_python(text, shown)
+            elif suffix == ".toml":
+                out += _index_toml(text, shown)
+            elif suffix in (".ts", ".tsx"):
+                out += _index_typescript(text, shown)
+            elif suffix == ".go":
+                out += _index_go(text, shown)
             else:
                 out += _index_yaml(text, shown)
         except (OSError, UnicodeDecodeError, ValueError, SyntaxError, yaml.YAMLError) as err:
