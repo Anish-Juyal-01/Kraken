@@ -29,7 +29,6 @@ room:
   description: "Coders bid on request K-{tag}."
   channel_type: channel_private
   agents: ["{bidder_1}", "{kraken}"]
-  users: ["{$creator}"]
   instructions: |
     This room picks who builds request [K-{tag}]. The bidders are {bidder_1}
     and, when present, {other_bidders}.

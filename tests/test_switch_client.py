@@ -244,6 +244,57 @@ async def test_send_returns_event_id(switch, client):
     assert json.loads(route.calls.last.request.content) == {"room_id": "r", "content": "hello"}
 
 
+async def test_connection_state_marks_open_and_stream_end_clears_it(switch, client):
+    switch.get(f"/agents/{AGENT}/events").mock(
+        return_value=sse(frame(None, "connection_state", {"rooms": [], "cursor": 0}, with_id=False), msg(1)))
+    stream = client.events()
+    assert not client._open.is_set()
+    async for _ in stream:
+        assert client._open.is_set()
+        break
+    await stream.aclose()
+    assert not client._open.is_set()
+
+
+async def test_wait_open_times_out_with_switch_error(client):
+    with pytest.raises(SwitchError) as ei:
+        await client.wait_open(timeout=0.01)
+    assert ei.value.status == 409
+
+
+async def test_op_waits_for_open_connection_then_retries(switch, client):
+    route = switch.post(f"/agents/{AGENT}/ops/list_rooms").mock(side_effect=[
+        httpx.Response(409, json={"detail": "connection conn-1 is not open; reconnect and resume"}),
+        httpx.Response(200, json={"result": ["ok"]})])
+    asyncio.get_running_loop().call_later(0.01, client._open.set)
+    assert await client.op("list_rooms") == ["ok"]
+    assert len(route.calls) == 2
+
+
+async def test_op_other_409_is_not_retried(switch, client):
+    route = switch.post(f"/agents/{AGENT}/ops/create_room").mock(
+        return_value=httpx.Response(409, json={"detail": "room exists"}))
+    with pytest.raises(SwitchError):
+        await client.op("create_room")
+    assert len(route.calls) == 1
+
+
+async def test_connection_context_opens_stream_and_beats(switch, client):
+    async def body():
+        yield frame(None, "connection_state", {"rooms": ["r"], "cursor": 0}, with_id=False)
+        await asyncio.Event().wait()
+
+    switch.get(f"/agents/{AGENT}/events").mock(
+        return_value=httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"}))
+    beat = switch.post(f"/agents/{AGENT}/connection/beat").mock(return_value=httpx.Response(200, json={}))
+    before = asyncio.all_tasks() - {asyncio.current_task()}
+    async with client.connection(timeout=2) as c:
+        assert c is client and client.rooms == ["r"]
+        await asyncio.sleep(0.05)
+    assert beat.called
+    assert asyncio.all_tasks() - {asyncio.current_task()} == before
+
+
 def test_parse_sse_skips_malformed_data_with_warning(caplog):
     lines = ["id: 3", "event: message", "data: {not json", "",
              "id: 4", "event: message", 'data: {"sequence": 4}', ""]

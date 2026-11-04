@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from contextlib import aclosing
+from contextlib import aclosing, asynccontextmanager
 from collections.abc import AsyncIterator, Iterable, Iterator
 from typing import Any
 
@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 CONTROL_KINDS = {"connection_state", "gap", "evicted", "subscription_changed", "room_released"}
 REQUEST_TIMEOUT = 10.0
+OPEN_TIMEOUT = 30.0
 
 
 class SwitchError(Exception):
@@ -82,6 +83,32 @@ class SwitchClient:
         self.cursor: int | None = None
         self.rooms: list[str] = []
         self._reopen = asyncio.Event()
+        # Set once Switch confirms the stream (its connection_state frame). Ops are refused
+        # with 409 "connection ... is not open" until then.
+        self._open = asyncio.Event()
+
+    async def wait_open(self, timeout: float = OPEN_TIMEOUT) -> None:
+        """Wait until the event stream is open; raise SwitchError if it does not open in time."""
+        try:
+            await asyncio.wait_for(self._open.wait(), timeout)
+        except TimeoutError:
+            raise SwitchError(409, f"event stream did not open within {timeout:g}s") from None
+
+    @asynccontextmanager
+    async def connection(self, timeout: float = OPEN_TIMEOUT) -> AsyncIterator["SwitchClient"]:
+        """Hold the connection open (stream + heartbeat) for a client that only makes ops."""
+        async def drain() -> None:
+            async for _ in self.events():
+                pass
+
+        tasks = [asyncio.create_task(drain()), asyncio.create_task(self.heartbeat_forever())]
+        try:
+            await self.wait_open(timeout)
+            yield self
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     @property
     def _auth(self) -> dict[str, str]:
@@ -113,6 +140,8 @@ class SwitchClient:
                         log.warning("event stream returned %s; reconnecting", resp.status_code)
             except httpx.HTTPError as err:
                 log.warning("event stream failed: %r; reconnecting", err)
+            finally:
+                self._open.clear()
             await asyncio.sleep(self.reconnect_delay)
 
     async def _read_stream(self, resp: httpx.Response) -> AsyncIterator[Event]:
@@ -147,6 +176,7 @@ class SwitchClient:
 
     def _to_event(self, id_: str | None, kind: str, data: dict) -> Event | None:
         if kind == "connection_state":
+            self._open.set()
             self.rooms = list(data.get("rooms", []))
             cursor = data.get("cursor")
             if self.cursor is None and isinstance(cursor, int) and not isinstance(cursor, bool):
@@ -183,16 +213,26 @@ class SwitchClient:
                 log.warning("heartbeat failed: %r", err)
             await asyncio.sleep(interval)
 
-    async def op(self, name: str, /, **args: Any) -> Any:
-        resp = await self.http.post(
-            self._url(f"ops/{name}"),
-            json=args,
-            headers={**self._auth, "X-Switch-Connection-Id": self.connection_id},
-            timeout=REQUEST_TIMEOUT,
-        )
+    async def op(self, name: str, /, *, _timeout: float = REQUEST_TIMEOUT, **args: Any) -> Any:
+        """Run a Switch op. If the connection is not open yet (or is reopening), wait and retry once.
+
+        `_timeout` is for slow ops: creating a room takes the local server well over 10 s.
+        """
+        resp = await self._post_op(name, args, _timeout)
+        if resp.status_code == 409 and "not open" in str(_detail(resp)):
+            await self.wait_open()
+            resp = await self._post_op(name, args, _timeout)
         if resp.status_code != 200:
             raise SwitchError(resp.status_code, _detail(resp))
         return resp.json()["result"]
+
+    async def _post_op(self, name: str, args: dict, timeout: float = REQUEST_TIMEOUT) -> httpx.Response:
+        return await self.http.post(
+            self._url(f"ops/{name}"),
+            json=args,
+            headers={**self._auth, "X-Switch-Connection-Id": self.connection_id},
+            timeout=timeout,
+        )
 
     async def send(self, room_id: str, content: str) -> str:
         resp = await self.http.post(

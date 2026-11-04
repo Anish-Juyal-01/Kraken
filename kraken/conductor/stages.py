@@ -1,4 +1,9 @@
+import asyncio
+import re
 from pathlib import Path
+
+import httpx
+import yaml
 
 from kraken.config import Config
 from kraken.crew import Crew, Role
@@ -15,17 +20,64 @@ class StageError(Exception):
         self.detail = detail
 
 
-async def open_stage(client: SwitchClient, stage: str, inputs: dict) -> str:
+def with_people(text: str, people: list[str], bridge: str | None = None) -> str:
+    """The template with `people` (chat usernames) as the room's users, on `bridge`."""
+    if not people and not bridge:
+        return text
+    doc = yaml.safe_load(text)
+    if people:
+        doc["room"]["users"] = list(people)
+    if bridge:
+        doc["room"]["bridge"] = bridge
+    return yaml.safe_dump(doc, allow_unicode=True, sort_keys=False, width=1000)
+
+
+async def open_stage(client: SwitchClient, stage: str, inputs: dict,
+                     people: list[str] | None = None, bridge: str | None = None) -> str:
     path = TEMPLATES_DIR / f"{stage}.template.yaml"
     try:
-        text = path.read_text(encoding="utf-8")
+        text = with_people(path.read_text(encoding="utf-8"), people or [], bridge)
     except OSError as err:
         raise StageError(stage, f"no template: {err}") from err
     try:
-        result = await client.op("create_room_from_yaml", yaml=text, inputs=inputs)
+        result = await client.op("create_room_from_yaml", yaml=text, inputs=inputs,
+                                 _timeout=CREATE_TIMEOUT_S)
     except SwitchError as err:
         raise StageError(stage, str(err.detail)) from err
+    except httpx.TimeoutException:
+        # The server may still have made the room; find it rather than lose track of it.
+        name = room_name(text, inputs)
+        room_id = await _find_room(client, name)
+        if room_id is None:
+            raise StageError(stage, f"Switch did not answer in {CREATE_TIMEOUT_S}s and no room "
+                                    f"named {name!r} appeared") from None
+        return room_id
     return result["room_id"]
+
+
+CREATE_TIMEOUT_S = 180
+FIND_ATTEMPTS, FIND_INTERVAL_S = 6, 10.0
+_PLACEHOLDER = re.compile(r"\{([a-z_0-9]+)\}")
+
+
+def room_name(text: str, inputs: dict) -> str:
+    """The room name a stage template renders to, for these inputs."""
+    raw = yaml.safe_load(text)["room"]["name"]
+    return _PLACEHOLDER.sub(lambda m: str(inputs.get(m.group(1), m.group(0))), raw)
+
+
+async def _find_room(client: SwitchClient, name: str) -> str | None:
+    for attempt in range(FIND_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(FIND_INTERVAL_S)
+        try:
+            rooms = await client.op("list_rooms")
+        except (SwitchError, httpx.HTTPError):
+            continue
+        for r in rooms if isinstance(rooms, list) else []:
+            if r.get("name") == name and r.get("room_id"):
+                return r["room_id"]
+    return None
 
 
 def _split(stage: str, names: list[str], what: str) -> dict:

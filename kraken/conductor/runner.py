@@ -2,6 +2,8 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+import httpx
+
 from kraken.conductor.stages import StageError, open_stage, stage_inputs
 from kraken.conductor.state import Action, stage_room
 from kraken.config import Config
@@ -10,6 +12,7 @@ from kraken.hallmark.ledger import Ledger, Request
 from kraken.switch_client import SwitchClient, SwitchError
 
 log = logging.getLogger(__name__)
+INVITE_TIMEOUT_S = 60  # the local Switch server is slow to add members
 
 # An invite adds a member without waking it, and the kickoff predates membership:
 # invited agents get a mention so they start work.
@@ -121,18 +124,20 @@ class ActionRunner:
             extra["reviewers"], invitees = reviewers, reviewers[1:]
         await self._connect_parent(req)
         inputs = stage_inputs(stage, req, self.cfg, self.crew, **extra)
-        room_id = await open_stage(self.client, stage, inputs)
+        room_id = await open_stage(self.client, stage, inputs, self.cfg.people, self.cfg.bridge)
         self.ledger.bind_room(req.id, stage, room_id)
         merge_data(self.ledger, req.id, stage_started=time.time(), timed_out=None)
         invited: list[str] = []
         for name in invitees:
             try:
-                await self.client.op("invite_agent_to_room", room_id=room_id, agent_name=name)
+                await self.client.op("invite_agent_to_room", room_id=room_id, agent_name=name,
+                                     _timeout=INVITE_TIMEOUT_S)
                 invited.append(name)
-            except SwitchError as err:
+            except (SwitchError, httpx.HTTPError) as err:
+                detail = err.detail if isinstance(err, SwitchError) else f"{type(err).__name__}"
                 log.warning("could not invite %s to %s: %s", name, room_id, err)
                 await self.client.send(
-                    req.origin_room, f"[K-{req.id}] could not invite {name}: {err.detail}")
+                    req.origin_room, f"[K-{req.id}] could not invite {name}: {detail}")
         if invited:
             mentions = " ".join(f"@{n}" for n in invited)
             try:

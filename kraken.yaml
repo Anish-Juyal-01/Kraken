@@ -24,6 +24,12 @@ timeouts_s:
 db_path: kraken.db
 relay_port: 8765
 kraken_agent: kraken
+# Your chat-app (Mattermost/Discord) usernames: added to every room Kraken opens
+# (Spark, Sonar, Charter, Forge, Storm) so you can answer its prompts.
+people: [anish_2007]
+# The messaging app those rooms go on: a Switch connection's display name.
+# Leave it out to use the server's default app.
+bridge: Dc Switch
 agents:
   planner: kraken-planner
   attacker: squall

@@ -51,11 +51,11 @@ Requirements: Python 3.12 or newer, Switch Console (with Docker for the local Sw
    source .venv/bin/activate        # Windows Git Bash: source .venv/Scripts/activate
    pip install -e ".[dev]"
    ```
-3. **Register Kraken and fill in `.env`.** Copy `.env.example` to `.env` and set `SWITCH_URL`, `SWITCH_REGISTRATION_TOKEN` and `ANTHROPIC_API_KEY`. Then register:
+3. **Register Kraken and fill in `.env`.** Copy `.env.example` to `.env` and set `SWITCH_URL` and `SWITCH_REGISTRATION_TOKEN`. For the model, either set `ANTHROPIC_API_KEY`, or leave it empty and Kraken uses your signed-in Claude Code CLI (`claude -p`) instead: no key, it runs on your Claude plan, about 7 s per call (`KRAKEN_LLM` forces `api` or `claude-code`). Then register:
    ```bash
    python scripts/register.py
    ```
-   It reads `.env` and prints `SWITCH_AGENT_ID=...` and `SWITCH_API_KEY=...`; paste both into `.env`. If registration is rejected, the script prints Switch's error.
+   It reads `.env` and prints `SWITCH_AGENT_ID=...` and `SWITCH_API_KEY=...`; paste both into `.env`. If registration is rejected, the script prints Switch's error. If an earlier attempt timed out but went through, it reports the agent already exists: rerun with `--overwrite` for a fresh key.
 4. **Create the crew in one click.** In Switch Console's Templates page, run `templates/kraken-crew.template.yaml`. It creates `kraken-planner`, three bidders (`claude-coder`, `claude-coder-2`, `claude-coder-3`), `squall`, `storm-defender` and `storm-coach`, each on the first installed coding agent, with `addressing: anyone` (Kraken wakes them by @-mention), auto mode, and its own clone of this repo (the `repo` param). The names match `bidders` and `agents` in `kraken.yaml`, which seed the crew the first time Kraken starts. To bring in other vendors (Codex, Gemini, Kimi, Qwen), create those agents in Switch Console and `@kraken enlist` them (see [Crew](#crew)).
 5. **Create the HQ rooms.** In Switch Console, create the rooms from `templates/kraken-hq.template.yaml`. That makes `#kraken-requests` and `#kraken-hallmark` with Kraken in both.
 6. **Create the demo channels.** Register the smoke-test agent first (`python scripts/register.py --name kraken-smoke`, see step 10), then run `templates/kraken-demo.template.yaml` in Switch Console. It creates `#backend`, `#mobile`, `#product` and `#partners` with Kraken and `kraken-smoke` in each. For your own team, add Kraken to whichever channels it should watch instead.
@@ -77,10 +77,10 @@ Requirements: Python 3.12 or newer, Switch Console (with Docker for the local Sw
 10. **Verify.**
     ```bash
     pytest                                  # offline unit suite
-    python tests/golden/run_golden.py       # real-LLM precision check, needs ANTHROPIC_API_KEY
+    python tests/golden/run_golden.py       # real-LLM precision check (API key or Claude Code CLI)
     python scripts/smoke.py                 # live end-to-end smoke
     ```
-    The smoke test needs Kraken running (step 8). It posts as its own agent, because Kraken ignores its own messages: register one with `python scripts/register.py --name kraken-smoke` (for any name other than `kraken` it prints `SMOKE_AGENT_ID=...` and `SMOKE_API_KEY=...`), paste both lines into `.env`, and add the agent to the demo rooms (step 6). It posts `demo/seed_chat.md` and passes when a resolution room appears. Exit codes: 0 OK, 1 timeout (no resolution room within 120 s), 2 setup missing (env values or a demo room).
+    The smoke test needs Kraken running (step 8). It posts as its own agent, because Kraken ignores its own messages: register one with `python scripts/register.py --name kraken-smoke` (for any name other than `kraken` it prints `SMOKE_AGENT_ID=...` and `SMOKE_API_KEY=...`), paste both lines into `.env`, and add the agent to the demo rooms (step 6). It posts `demo/seed_chat.md` and passes when a resolution room appears. Exit codes: 0 OK, 1 timeout (no resolution room within 600 s; set `SMOKE_TIMEOUT` to change), 2 setup missing (env values or a demo room).
 
 ### Resetting before a demo
 
@@ -91,7 +91,8 @@ A rehearsal leaves claims, pairs and requests in `kraken.db`. To start clean: st
 | Variable | Used by |
 |---|---|
 | `SWITCH_URL`, `SWITCH_AGENT_ID`, `SWITCH_API_KEY` | Kraken core (step 3) |
-| `ANTHROPIC_API_KEY` | Sonar, the judge, the golden run |
+| `ANTHROPIC_API_KEY` | Sonar, the judge, the golden run (optional: without it they use the Claude Code CLI) |
+| `KRAKEN_LLM` | `auto` (default), `api` or `claude-code`; `KRAKEN_CLAUDE_BIN` overrides the CLI path |
 | `DISCORD_RELAY_TOKEN`, `KRAKEN_RELAY_SECRET` | Optional relay (step 9) |
 | `SWITCH_REGISTRATION_TOKEN` | `scripts/register.py` only (step 3) |
 | `SMOKE_AGENT_ID`, `SMOKE_API_KEY` | `scripts/smoke.py` only (step 10) |

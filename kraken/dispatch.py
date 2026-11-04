@@ -29,10 +29,23 @@ _MENTION = re.compile(r"^@kraken\b[:,]?\s*", re.IGNORECASE)
 _RESOLVE_HINT = "reply 1️⃣, 2️⃣ or 🙅"
 _QUOTE_MAX = 300
 _CREW_KINDS = ("crew", "enlist", "retire")
+# Status lines Switch posts on an agent's behalf. They look like ordinary messages (an
+# offline notice even starts with "@kraken"), so match the text: live, one became request K-4.
+_SWITCH_NOTICE = re.compile(
+    r"^(@\S+\s+)*(I'm currently offline\b.*connector isn't reporting in"
+    r"|Starting a session to handle this\b)", re.IGNORECASE | re.DOTALL)
 
 
 class BidPick(BaseModel):
     winner: str
+    reason: str = ""
+
+PICK_SYSTEM = (
+    "You judge bids from coding agents for one brief. Pick the bid whose plan best meets "
+    "the brief's acceptance criteria: correct, complete, smallest safe change, honest risks. "
+    "Judge the content only; the order the bids are listed in means nothing. "
+    'Reply with JSON only: {"winner": "<agent name>", "reason": "<one sentence>"}.'
+)
 
 
 def _render(c: Conflict) -> str:
@@ -155,7 +168,7 @@ class Dispatcher:
         if not isinstance(body, str):
             return
         if (p.get("sender") == self.self_id or p.get("sender_name") == self.cfg.kraken_agent
-                or p.get("sender_kind") == "platform"):
+                or p.get("sender_kind") == "platform" or _SWITCH_NOTICE.match(body.strip())):
             return
         if p.get("message_id"):
             if self._seen(p["message_id"]):
@@ -360,13 +373,13 @@ class Dispatcher:
         bids = "\n\n".join(f"{i}. {b['agent']}:\n{b.get('text', '')}"
                            for i, b in enumerate(req.bids, 1))
         try:
-            pick = await self.llm.json(
-                SMART, "Pick the bid that best fits the brief. "
-                'Reply with JSON only: {"winner": "<agent name>"}.',
-                f"Brief:\n{req.brief}\n\nBids:\n{bids}", BidPick)
+            pick = await self.llm.json(SMART, PICK_SYSTEM,
+                                       f"Brief:\n{req.brief}\n\nBids:\n{bids}", BidPick)
         except LLMParseError:
+            log.warning("K-%s: bid pick unparsable; falling back to the first bid", req.id)
             return {}
-        return {"judged_winner": pick.winner}
+        log.info("K-%s: judged winner %s (%s)", req.id, pick.winner, pick.reason)
+        return {"judged_winner": pick.winner, "pick_reason": pick.reason}
 
     # ---- Sonar ----------------------------------------------------------
     async def _sonar(self, ev: Event) -> None:
@@ -376,7 +389,7 @@ class Dispatcher:
                 cid = self.ledger.add_claim(claim)
                 await self._store_source(cid, ev)
                 for conflict in await detect(self.llm, self.ledger, cid, claim,
-                                             self.cfg.sonar.threshold):
+                                             self.cfg.sonar.threshold, where=self._where):
                     await self._open_resolution(conflict, cid)
                 await self._code_conflicts(cid, claim)
         except LLMParseError:
@@ -406,6 +419,20 @@ class Dispatcher:
                "body": p.get("body") or "", "room_name": await self._room_name(ev.room_id)}
         self.ledger.set_meta(f"claimsrc:{claim_id}", json.dumps(src))
 
+    def _where(self, claim_id: int, c: Claim) -> str | None:
+        """Readable origin of a chat claim for the judge, with the message it came from.
+
+        Live, raw ids alone left the judge hedging on scope ("unless the scopes differ"),
+        scoring a real UUID-vs-integer clash 0.6-0.72; the quote ("everywhere", "every
+        response model") settles scope and lifts it to 0.8, while compatible pairs stay
+        compatible."""
+        raw = self.ledger.get_meta(f"claimsrc:{claim_id}")
+        if raw is None:
+            return None
+        src = json.loads(raw)
+        quote = src["body"][:_QUOTE_MAX].replace('"', "'")
+        return f'{src["sender_name"] or c.speaker} in #{src["room_name"]}, who wrote: "{quote}"'
+
     def _side(self, claim_id: int, c: Claim) -> tuple[str, str, str]:
         """(quote, link, user) for one side of a resolution."""
         if c.source == "code":
@@ -428,7 +455,7 @@ class Dispatcher:
                 code_id = None  # the code changed since it was stored
             if code_id is not None and self.ledger.pair_seen(code_id, chat_id):
                 continue
-            conflict = await judge(self.llm, code, chat)
+            conflict = await judge(self.llm, code, chat, where_b=self._where(chat_id, chat))
             if conflict.verdict != "conflict" or conflict.confidence < self.cfg.sonar.threshold:
                 continue
             if code_id is None:

@@ -155,6 +155,15 @@ async def test_conflict_opens_resolution_room(ledger):
     assert req.data == {"a": 1, "b": 2, "stage_started": req.data["stage_started"]}
 
 
+async def test_judge_is_told_who_said_it_and_where(ledger):
+    # Raw sender/room ids left the judge unsure (0.6 < 0.75 live); names lift it over.
+    client, d = await open_resolution(ledger)
+    judge_prompt = d.llm.calls[-1]["user"]
+    assert "ann in #" in judge_prompt and "bob in #" in judge_prompt
+    assert f'who wrote: "{LONG1[:40]}' in judge_prompt and f'who wrote: "{LONG2[:40]}' in judge_prompt
+    assert "u-a in" not in judge_prompt
+
+
 async def test_stage_error_posts_retry(ledger):
     client, d = make(ledger, MockClient(fail_create=SwitchError(500, "boom")))
     await d.handle(ev(1, "@kraken build it", addressed=True))
@@ -302,6 +311,31 @@ async def test_auto_pick_uses_judged_winner(ledger):
     req = ledger.get_request(rid)
     assert req.state == "FORGE" and req.winner == "codex-coder"
     assert llm.calls[0]["user"].startswith("Brief:\nB") and "2. codex-coder" in llm.calls[0]["user"]
+    assert "order the bids are listed in means nothing" in llm.calls[0]["system"]
+
+
+async def test_switch_status_notices_are_ignored(ledger):
+    client, d = make(ledger)
+    for seq, body in enumerate([
+            "@kraken I'm currently offline — my connector isn't reporting in. "
+            "I'll respond once it reconnects.",
+            "Starting a session to handle this — one moment."], 1):
+        await d.handle(ev(seq, body, addressed=True, name="kraken-smoke"))
+    assert ledger.open_requests() == [] and client.created("Spark") == []
+    await d.handle(ev(3, "@kraken build password reset", addressed=True))
+    assert len(client.created("Spark")) == 1  # real requests still work
+
+
+async def test_auto_pick_reason_is_stored(ledger):
+    llm = FakeLLM(['{"winner": "codex-coder", "reason": "covers every criterion"}'])
+    client, d = make(ledger, llm=llm, autonomy={"pick": "auto"})
+    rid = request_in(ledger, "CHARTER", rooms={"charter": "ch"}, brief="B",
+                     data={"live_bidders": BIDDERS[:2]})
+    await d.handle(ev(1, "BID: a", room="ch", name="claude-coder"))
+    await d.handle(ev(2, "BID: b", room="ch", name="codex-coder"))
+    pick = ledger.get_request(rid).data["pick"]
+    assert pick["judged"] == "codex-coder" and pick["reason"] == "covers every criterion"
+    assert pick["order"] == ["claude-coder", "codex-coder"] and not pick["fallback_to_first_bid"]
 
 
 async def test_gap_recovers_unseen_messages(ledger):

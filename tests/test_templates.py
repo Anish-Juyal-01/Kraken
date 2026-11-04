@@ -62,7 +62,9 @@ def test_stage_room_has_kraken_and_tag(name):
     assert "{kraken}" in room["agents"]
     assert "[K-{tag}]" in room["name"]
     assert room["channel_type"] == "channel_private"
-    assert "{$creator}" in room["users"]
+    # Kraken (an agent, with no chat account) creates stage rooms, so no {$creator};
+    # people come from kraken.yaml `people` (see stages.with_people).
+    assert "users" not in room and "$creator" not in str(doc)
     assert doc["params"]["kraken"]["type"] == "agent"
     assert doc["params"]["kraken"]["default"] == "kraken"
     assert "@{kraken}" not in doc["kickoff"]
@@ -91,7 +93,6 @@ def test_spark_params():
 
 def test_resolution_room():
     doc = load("sonar-resolution")
-    assert doc["room"]["users"] == ["{$creator}"]
     assert doc["params"]["user_a"]["type"] == "string" and doc["params"]["user_b"]["type"] == "string"
     assert doc["kickoff"] == "{prompt_text}"
     assert {"tag", "subject", "quote_a", "link_a", "user_a", "quote_b", "link_b", "user_b",
@@ -125,3 +126,5 @@ def test_storm_mode_and_roles():
     assert "python -m storm.faults" in text and "SURVIVED" in text and "FAILED" in text
     for a in ("@{attacker}", "@{defender}", "@{coach}"):
         assert a in doc["kickoff"]
+    # agents wake only on mentions: each hand-off must tag the next agent (live stall, K-2)
+    assert "mentions @{defender} and @{coach}" in text and "mention @{coach}" in text

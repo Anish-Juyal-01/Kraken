@@ -288,6 +288,16 @@ def test_charter_auto_pick_unknown_judged_winner_falls_back():
     upd, acts = step(r, cfg_with(autonomy=ALL_AUTO),
                      Signal(kind="bids_done", data={"judged_winner": "ghost"}))
     assert upd["winner"] == "a" and upd["state"] == "FORGE"
+    assert upd["data"]["pick"]["fallback_to_first_bid"] is True
+
+
+def test_charter_auto_pick_is_recorded_for_audit():
+    r = req(state="CHARTER", bids=[{"agent": "a"}, {"agent": "b"}])
+    upd, _ = step(r, cfg_with(autonomy=ALL_AUTO), Signal(kind="bids_done", data={
+        "judged_winner": "b", "pick_reason": "smaller change"}))
+    assert upd["winner"] == "b"
+    assert upd["data"]["pick"] == {"judged": "b", "reason": "smaller change", "order": ["a", "b"],
+                                   "fallback_to_first_bid": False}
 
 
 def test_charter_prompt_beyond_nine_bids_offers_pick_by_name():

@@ -3,6 +3,11 @@
 # Switch Console; Sonar listens in all of them.
 version: 1
 params:
+  chat:
+    type: bridge
+    label: Chat app
+    description: Messaging app the rooms go on (a Switch connection's name). Empty uses the server's default.
+    required: false
   kraken:
     type: agent
     label: Kraken agent
@@ -18,6 +23,7 @@ rooms:
   - name: backend
     description: Backend team channel.
     channel_type: channel_public
+    bridge: "{chat}"
     agents: ["{kraken}", "{smoke}"]
     users: ["{$creator}"]
     instructions: |
@@ -27,6 +33,7 @@ rooms:
   - name: mobile
     description: Mobile team channel.
     channel_type: channel_public
+    bridge: "{chat}"
     agents: ["{kraken}", "{smoke}"]
     users: ["{$creator}"]
     instructions: |
@@ -36,6 +43,7 @@ rooms:
   - name: product
     description: Product team channel.
     channel_type: channel_public
+    bridge: "{chat}"
     agents: ["{kraken}", "{smoke}"]
     users: ["{$creator}"]
     instructions: |
@@ -45,6 +53,7 @@ rooms:
   - name: partners
     description: Partner relations channel.
     channel_type: channel_public
+    bridge: "{chat}"
     agents: ["{kraken}", "{smoke}"]
     users: ["{$creator}"]
     instructions: |

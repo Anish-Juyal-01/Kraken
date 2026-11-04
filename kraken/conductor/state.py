@@ -111,8 +111,11 @@ def _bid(req, cfg, inp):
     return {"bids": [*req.bids, dict(_sig(inp))]}, []
 
 
-def _to_forge(req, winner):
-    return {"winner": winner, "state": "FORGE", "data": _data(req)}, [_open("forge")]
+def _to_forge(req, winner, pick: dict | None = None):
+    data = _data(req)
+    if pick is not None:
+        data["pick"] = pick  # how an auto pick was made, so it can be audited
+    return {"winner": winner, "state": "FORGE", "data": data}, [_open("forge")]
 
 
 def _bids_closed(req, cfg, inp):
@@ -125,8 +128,12 @@ def _bids_closed(req, cfg, inp):
             posts = [_post(posts[0].text + "\n…or reply pick <name>")]
         return upd, posts
     agents = [b["agent"] for b in req.bids]
-    winner = _sig(inp).get("judged_winner")
-    return _to_forge(req, winner if winner in agents else agents[0])
+    sig = _sig(inp)
+    judged = sig.get("judged_winner")
+    fallback = judged not in agents
+    pick = {"judged": judged, "reason": sig.get("pick_reason", ""), "order": agents,
+            "fallback_to_first_bid": fallback}
+    return _to_forge(req, agents[0] if fallback else judged, pick)
 
 
 def _pick(req, cfg, inp):

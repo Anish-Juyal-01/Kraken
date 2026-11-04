@@ -43,18 +43,26 @@ def main() -> int:
     parser.add_argument("--url", default=os.environ.get("SWITCH_URL"))
     parser.add_argument("--token", default=os.environ.get("SWITCH_REGISTRATION_TOKEN"))
     parser.add_argument("--name", default="kraken", help="agent name (default: kraken)")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="re-register an existing agent (rotates its API key)")
     args = parser.parse_args()
     if not args.url or not args.token:
         parser.error("need --url/SWITCH_URL and --token/SWITCH_REGISTRATION_TOKEN")
+    body = {**BODY, "name": args.name,
+            "display_name": "Kraken" if args.name == "kraken" else args.name}
+    if args.overwrite:
+        body["overwrite"] = True
+    # The first registration on a fresh server also provisions the chat bot and can be slow.
     resp = httpx.post(
         f"{args.url.rstrip('/')}/agents",
-        json={**BODY, "name": args.name,
-              "display_name": "Kraken" if args.name == "kraken" else args.name},
+        json=body,
         headers={"Authorization": f"Bearer {args.token}"},
-        timeout=15,
+        timeout=120,
     )
     if resp.status_code >= 400:
         print(f"Registration failed ({resp.status_code}): {resp.text}", file=sys.stderr)
+        if resp.status_code == 409:
+            print("The agent already exists. Rerun with --overwrite to get a fresh API key.", file=sys.stderr)
         if resp.status_code == 400:
             print("If connector_type was rejected, read the valid value above and edit BODY.", file=sys.stderr)
         return 1

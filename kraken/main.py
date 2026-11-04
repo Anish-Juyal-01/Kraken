@@ -10,7 +10,7 @@ from kraken.config import load_config
 from kraken.crew import Crew
 from kraken.dispatch import Dispatcher
 from kraken.hallmark.ledger import Ledger
-from kraken.llm import ClaudeLLM
+from kraken.llm import make_llm
 from kraken.relay.server import make_app
 from kraken.sonar.code_check import index_code
 from kraken.switch_client import SwitchClient
@@ -58,6 +58,17 @@ async def consume(client: SwitchClient, dispatcher: Dispatcher) -> None:
         await dispatcher.handle(ev)
 
 
+async def find_hq_rooms(client: SwitchClient, dispatcher: Dispatcher, cfg) -> None:
+    wanted = {cfg.rooms.requests, cfg.rooms.hallmark}
+    for room in await client.op("list_rooms"):
+        # an archived room can share its name with the live one (e.g. after moving chat apps)
+        if room["name"] in wanted and not room.get("archived"):
+            dispatcher.room_ids[room["name"]] = room["room_id"]
+    missing = wanted - set(dispatcher.room_ids)
+    if missing:
+        log.warning("rooms not found for this agent: %s", ", ".join(sorted(missing)))
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     load_env()
@@ -69,14 +80,9 @@ async def main() -> None:
     code_index = index_code(cfg.sonar.code_paths)
     log.info("indexed %d code claims", len(code_index))
     # Switch gives the agent's own participant id as its agent id.
-    dispatcher = Dispatcher(client, ClaudeLLM(), ledger, cfg, code_index, self_id=client.agent_id)
-    wanted = {cfg.rooms.requests, cfg.rooms.hallmark}
-    for room in await client.op("list_rooms"):
-        if room["name"] in wanted:
-            dispatcher.room_ids[room["name"]] = room["room_id"]
-    missing = wanted - set(dispatcher.room_ids)
-    if missing:
-        log.warning("rooms not found for this agent: %s", ", ".join(sorted(missing)))
+    llm = make_llm()
+    log.info("LLM backend: %s", type(llm).__name__)
+    dispatcher = Dispatcher(client, llm, ledger, cfg, code_index, self_id=client.agent_id)
     runner = None
     secret = os.environ.get("KRAKEN_RELAY_SECRET")
     if secret:
@@ -88,9 +94,13 @@ async def main() -> None:
         log.info("KRAKEN_RELAY_SECRET not set; reaction relay disabled")
     try:
         async with asyncio.TaskGroup() as tg:
+            # Switch refuses ops until the event stream is open, so open it first.
             tg.create_task(client.heartbeat_forever())
-            tg.create_task(ticker(dispatcher))
             tg.create_task(consume(client, dispatcher))
+            await client.wait_open()
+            await find_hq_rooms(client, dispatcher, cfg)
+            log.info("connected to Switch; listening in %d rooms", len(client.rooms))
+            tg.create_task(ticker(dispatcher))
     finally:
         if runner is not None:
             await runner.cleanup()

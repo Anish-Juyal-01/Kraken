@@ -37,7 +37,6 @@ room:
   description: "Stress test of request K-{tag}."
   channel_type: channel_private
   agents: ["{attacker}", "{defender}", "{coach}", "{kraken}"]
-  users: ["{$creator}"]
   instructions: |
     This room stress-tests the change for request [K-{tag}]: {diff_ref}.
     This round runs in {mode} mode.
@@ -47,16 +46,21 @@ room:
 
     Attacker ({attacker}): pick exactly 3 faults and inject them one at a time
     with python -m storm.faults <name>. Post each fault name and what broke.
+    When all 3 are done, post a summary that mentions @{defender} and @{coach}.
 
     Defender ({defender}):
     - auto mode: fix every failure the faults expose, commit the fix to the
       branch, and say what you changed.
     - drill mode: do not change code. Give hints only, so the team can practise
       the fix themselves.
+    When you have answered every fault, post your verdict and mention @{coach}.
 
-    Coach ({coach}): after the 3 faults, judge the round. End with a line that
-    is exactly SURVIVED if the change held up, or exactly FAILED if it did not,
-    followed by your findings.
+    Coach ({coach}): after the 3 faults and the defender's verdict, judge the
+    round. End with a line that is exactly SURVIVED if the change held up, or
+    exactly FAILED if it did not, followed by your findings.
+
+    Hand-off rule: agents only wake when mentioned, so every hand-off above
+    must @-mention the next agent, or the round stalls.
 
     Marker rule: SURVIVED and FAILED are written only by the coach, each on its
     own line, once, at the end of the round.

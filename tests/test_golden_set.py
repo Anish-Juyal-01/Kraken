@@ -67,13 +67,16 @@ def test_resolution_room_prefix_and_lookup():
     template = (ROOT / "templates" / "sonar-resolution.template.yaml").read_text(encoding="utf-8")
     prefix = smoke.room_prefix(template)
     assert prefix == "Sonar [K-"
-    names = ["backend", "Sonar [K-1]: user_id type"]
-    stale = {"Sonar [K-1]: user_id type"}
-    assert smoke.find_resolution_room(names, prefix, set()) == "Sonar [K-1]: user_id type"
-    assert smoke.find_resolution_room(names, prefix, stale) is None
-    names.append("Sonar [K-2]: v1 endpoint")
-    assert smoke.find_resolution_room(names, prefix, stale) == "Sonar [K-2]: v1 endpoint"
-    assert smoke.find_resolution_room(names[:1], prefix, set()) is None
+    rooms = [("backend", "r0"), ("Sonar [K-1]: user_id type", "r1")]
+    stale = {"r1"}
+    assert smoke.find_resolution_room(rooms, prefix, set()) == "Sonar [K-1]: user_id type"
+    assert smoke.find_resolution_room(rooms, prefix, stale) is None
+    rooms.append(("Sonar [K-2]: v1 endpoint", "r2"))
+    assert smoke.find_resolution_room(rooms, prefix, stale) == "Sonar [K-2]: v1 endpoint"
+    assert smoke.find_resolution_room(rooms[:1], prefix, set()) is None
+    # after a ledger reset a new room may reuse an archived room's name: ids tell them apart
+    rooms.append(("Sonar [K-1]: user_id type", "r3"))
+    assert smoke.find_resolution_room(rooms, prefix, {"r1", "r2"}) == "Sonar [K-1]: user_id type"
 
 
 async def test_all_room_names_follows_cursor():
@@ -88,9 +91,22 @@ async def test_all_room_names_follows_cursor():
         calls.append((name, args))
         return pages[args.get("cursor")]
 
-    assert await smoke.all_room_names(fake_op, "Sonar [K-") == ["Sonar [K-1]: a", "Sonar [K-2]: b"]
+    assert await smoke.all_room_names(fake_op, "Sonar [K-") == [("Sonar [K-1]: a", "Sonar [K-1]: a"),
+                                                                ("Sonar [K-2]: b", "Sonar [K-2]: b")]
     assert [c[0] for c in calls] == ["list_all_rooms", "list_all_rooms"]
-    assert calls[0][1]["name_contains"] == "Sonar [K-" and calls[1][1]["cursor"] == "c1"
+    assert "name_contains" not in calls[0][1] and calls[1][1]["cursor"] == "c1"
+
+
+async def test_all_room_names_plain_list_filters_locally():
+    smoke = _load_smoke()
+    calls = []
+
+    async def fake_op(name, **args):
+        calls.append(args)
+        return [{"name": "backend"}, {"name": "Sonar [K-3]: c", "room_id": "r3"}, {"name": None}]
+
+    assert await smoke.all_room_names(fake_op, "Sonar [K-") == [("Sonar [K-3]: c", "r3")]
+    assert calls == [{"include_archived": True}]  # Switch 0.40 rejects name filters
 
 
 def test_check_env_requires_smoke_identity():

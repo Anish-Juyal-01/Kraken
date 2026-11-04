@@ -1,6 +1,11 @@
 # Kraken HQ: the two standing rooms. Create once from Switch Console.
 version: 1
 params:
+  chat:
+    type: bridge
+    label: Chat app
+    description: Messaging app the rooms go on (a Switch connection's name). Empty uses the server's default.
+    required: false
   requests:
     type: string
     label: Requests room name
@@ -20,6 +25,7 @@ rooms:
   - name: "{requests}"
     description: Ask Kraken for work here, for example "@kraken build password reset".
     channel_type: channel_private
+    bridge: "{chat}"
     agents: ["{kraken}"]
     users: ["{$creator}"]
     instructions: |
@@ -29,6 +35,7 @@ rooms:
   - name: "{hallmark}"
     description: The decision ledger. Kraken keeps it as the room document Hallmark.
     channel_type: channel_private
+    bridge: "{chat}"
     agents: ["{kraken}"]
     users: ["{$creator}"]
     instructions: |

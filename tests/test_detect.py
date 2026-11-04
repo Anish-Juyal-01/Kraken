@@ -56,6 +56,27 @@ async def test_dedupe_across_instances(tmp_path, open_ledger):
     assert llm.calls == []
 
 
+async def test_judge_sees_readable_origins_when_given(ledger):
+    ida = ledger.add_claim(claim("uuid"))
+    b = claim("int")
+    idb = ledger.add_claim(b)
+    llm = FakeLLM([answer()])
+    names = {ida: "Sam in #backend", idb: "Priya in #mobile"}
+    await detect(llm, ledger, idb, b, 0.75, where=lambda cid, _c: names[cid])
+    prompt = llm.calls[0]["user"]
+    assert "Sam in #backend" in prompt and "Priya in #mobile" in prompt
+    assert "@sam in backend" not in prompt
+
+
+async def test_judge_falls_back_to_raw_ids(ledger):
+    ledger.add_claim(claim("uuid"))
+    b = claim("int")
+    idb = ledger.add_claim(b)
+    llm = FakeLLM([answer()])
+    await detect(llm, ledger, idb, b, 0.75, where=lambda _cid, _c: None)
+    assert "@sam in backend" in llm.calls[0]["user"]
+
+
 async def test_dismissals_raise_threshold(ledger):
     ids = [ledger.add_claim(claim(f"v{i}")) for i in range(4)]
     ledger.mark_pair(ids[0], ids[1], "dismissed")

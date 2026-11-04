@@ -35,6 +35,72 @@ async def test_open_stage_calls_create_room_from_yaml():
     assert "version: 1" in call["yaml"] and "Spark [K-{tag}]" in call["yaml"]
 
 
+async def test_open_stage_adds_people_as_users():
+    import yaml
+    c = MockClient()
+    await open_stage(c, "sonar-resolution", {"tag": "7"}, ["user", "sam"])
+    doc = yaml.safe_load(c.ops["create_room_from_yaml"][0]["yaml"])
+    assert doc["room"]["users"] == ["user", "sam"]
+    assert doc["room"]["name"] == "Sonar [K-{tag}]: {subject}" and doc["kickoff"] == "{prompt_text}"
+    assert "1️⃣" in doc["room"]["instructions"]  # unicode survives the round trip
+
+
+async def test_open_stage_puts_room_on_the_configured_bridge():
+    import yaml
+    c = MockClient()
+    await open_stage(c, "spark", {"tag": "7"}, [], "Dc Switch")
+    doc = yaml.safe_load(c.ops["create_room_from_yaml"][0]["yaml"])
+    assert doc["room"]["bridge"] == "Dc Switch" and "users" not in doc["room"]
+
+
+async def test_open_stage_without_people_sends_template_unchanged():
+    c = MockClient()
+    await open_stage(c, "spark", {"tag": "7"}, [])
+    from kraken.conductor.stages import TEMPLATES_DIR
+    assert c.ops["create_room_from_yaml"][0]["yaml"] == (
+        TEMPLATES_DIR / "spark.template.yaml").read_text(encoding="utf-8")
+
+
+async def test_open_stage_waits_long_for_room_creation():
+    c = MockClient()
+    await open_stage(c, "spark", {"tag": "7"})
+    assert c.ops["create_room_from_yaml"][0]["_timeout"] >= 120
+
+
+class SlowClient(MockClient):
+    """create_room_from_yaml times out, but the room shows up in list_rooms."""
+
+    def __init__(self, rooms_after: int, rooms):
+        super().__init__()
+        self.rooms_after, self.rooms, self.lists = rooms_after, rooms, 0
+
+    async def op(self, name, **args):
+        self.ops.setdefault(name, []).append(args)
+        if name == "create_room_from_yaml":
+            import httpx
+            raise httpx.ReadTimeout("slow")
+        self.lists += 1
+        return self.rooms if self.lists > self.rooms_after else []
+
+
+async def test_open_stage_timeout_finds_the_room_by_name(monkeypatch):
+    import kraken.conductor.stages as st
+    monkeypatch.setattr(st, "FIND_INTERVAL_S", 0)
+    c = SlowClient(1, [{"name": "Sonar [K-7]: other", "room_id": "x"},
+                       {"name": "Sonar [K-7]: user_id.type", "room_id": "r-9"}])
+    rid = await open_stage(c, "sonar-resolution", {"tag": "7", "subject": "user_id.type"})
+    assert rid == "r-9" and c.lists == 2
+
+
+async def test_open_stage_timeout_without_room_raises(monkeypatch):
+    import kraken.conductor.stages as st
+    monkeypatch.setattr(st, "FIND_INTERVAL_S", 0)
+    c = SlowClient(99, [])
+    with pytest.raises(StageError) as e:
+        await open_stage(c, "spark", {"tag": "7"})
+    assert "Spark [K-7]" in e.value.detail and c.lists == st.FIND_ATTEMPTS
+
+
 async def test_open_stage_wraps_switch_error():
     c = MockClient(error=SwitchError(404, "no such agent"))
     with pytest.raises(StageError) as e:

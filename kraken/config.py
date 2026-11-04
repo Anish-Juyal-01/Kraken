@@ -52,6 +52,13 @@ class Config(BaseModel):
     charter: CharterConfig = Field(default_factory=CharterConfig)
     bidders: list[str] = Field(default_factory=list)
     kraken_agent: str = "kraken"
+    # Chat-app usernames added to every stage room Kraken opens, so people can answer
+    # its prompts. Kraken creates those rooms as an agent, which has no chat account,
+    # so the templates cannot use {$creator}.
+    people: list[str] = Field(default_factory=list)
+    # Display name of the messaging app (Switch "bridge") for stage rooms, e.g. a Discord
+    # connection's name. None uses the server's default app.
+    bridge: str | None = None
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     timeouts_s: dict[str, int] = Field(default_factory=_default_timeouts)
     db_path: str = "kraken.db"

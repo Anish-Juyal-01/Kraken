@@ -32,7 +32,6 @@ room:
   description: "{coder} builds request K-{tag}; reviewers check it against the brief."
   channel_type: channel_private
   agents: ["{coder}", "{reviewer_1}", "{kraken}"]
-  users: ["{$creator}"]
   instructions: |
     This room builds request [K-{tag}]. {coder} owns the branch kraken/K-{tag}
     and makes the commits. The reviewers are {reviewer_1} and, when present,

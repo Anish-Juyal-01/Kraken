@@ -24,7 +24,6 @@ room:
   description: "Turns request K-{tag} into a brief."
   channel_type: channel_private
   agents: ["{planner}", "{kraken}"]
-  users: ["{$creator}"]
   instructions: |
     This room turns request [K-{tag}] from {owner} into a brief that coders can bid on.
 

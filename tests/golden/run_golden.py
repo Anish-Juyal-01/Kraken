@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from kraken.config import load_config  # noqa: E402
 from kraken.hallmark.ledger import Ledger  # noqa: E402
-from kraken.llm import ClaudeLLM  # noqa: E402
+from kraken.llm import find_claude_cli, make_llm  # noqa: E402
 from kraken.main import load_env  # noqa: E402
 from kraken.models import Event  # noqa: E402
 from kraken.sonar.detect import detect, judge, norm_value  # noqa: E402
@@ -90,7 +90,7 @@ async def predict(llm, pair: dict, threshold: float, min_words: int) -> str:
 
 async def run(pairs: list[dict]) -> Counter:
     cfg = load_config(str(ROOT / "kraken.yaml"))
-    llm = ClaudeLLM()
+    llm = make_llm()
     confusion: Counter = Counter()
     for i, pair in enumerate(pairs, start=1):
         got = await predict(llm, pair, cfg.sonar.threshold, cfg.sonar.min_words)
@@ -102,9 +102,9 @@ async def run(pairs: list[dict]) -> Counter:
 
 def main() -> int:
     load_env(str(ROOT / ".env"))
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("ANTHROPIC_API_KEY is not set (env or .env); the golden set needs the real model.",
-              file=sys.stderr)
+    if not os.environ.get("ANTHROPIC_API_KEY") and not find_claude_cli():
+        print("Neither ANTHROPIC_API_KEY nor the Claude Code CLI is available; "
+              "the golden set needs the real model.", file=sys.stderr)
         return 2
     pairs = yaml.safe_load(PAIRS_PATH.read_text(encoding="utf-8"))
     confusion = asyncio.run(run(pairs))
