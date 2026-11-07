@@ -13,11 +13,16 @@ def load() -> dict:
     return yaml.safe_load(PATH.read_text(encoding="utf-8"))
 
 
-def test_creates_exactly_the_seeded_crew():
+def test_seats_match_the_config_and_coders_are_named_after_the_provider():
     cfg = load_config(str(ROOT / "kraken.yaml"))
     a = cfg.agents
     names = {e["name"] for e in load()["agents"]}
-    assert names == {*cfg.bidders, a.planner, a.attacker, a.defender, a.coach}
+    coders = {"{provider}-coder", "{provider}-coder-2", "{provider}-coder-3"}
+    assert names == {*coders, a.planner, a.attacker, a.defender, a.coach}
+    assert cfg.charter.auto_join  # the coders aren't seeded: they join at the first Charter
+    assert load()["params"]["provider"]["default"] == "claude"
+    for e in load()["agents"]:
+        assert e["provider"] == "{provider}", e["name"]
 
 
 def test_every_agent_is_runnable_and_reachable():

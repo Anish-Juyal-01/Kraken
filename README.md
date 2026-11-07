@@ -56,7 +56,7 @@ Switch is not a plug-in here: Kraken is built out of it, and without Switch ther
 | **Rooms on Discord** (bridge) | Every stage of every request gets its own room (`#spark-k-5`, `#charter-k-5`, …), so people and agents work side by side in normal Discord channels. |
 | **Agent protocol** (SSE in, HTTP ops out) | Kraken is itself a Switch agent. One event stream (`scope=all`) lets it hear every room it belongs to. |
 | **Room templates + `run_template`** | Each stage is a template in `templates/`. Kraken creates the rooms on demand, with the right agents and people in them. |
-| **Bring any agent** | The crew is real coding agents in Switch: Claude Code (planner, three coders, three Storm agents) and Gemini through OpenCode. They all talk in the same rooms. |
+| **Bring any agent** | The crew is real coding agents in Switch, on whatever vendor you choose: Claude Code, Codex, OpenCode (Gemini, Kimi, Qwen, …) or anything that speaks the protocol. Our runs used Claude Code and Gemini through OpenCode, side by side in the same rooms. |
 | **Agent list** (`list_agents`) | Any new coding agent added in Switch Console joins the crew and bids at the next Charter on its own: no code change, no command. |
 | **Runs** | Every room made for one request is recorded in one Switch run, a full trail from request to pull request. |
 | **Room documents** | Briefs live as documents in their stage rooms; the Hallmark ledger is mirrored as a document. |
@@ -66,7 +66,7 @@ The order of the stages lives in code (a small state machine), not in prompts. A
 
 ## Run it yourself
 
-**You need:** Python 3.12+, [Switch Console](https://docs.switchagents.ai/switch-rooms/getting-started) with Docker (Console runs the local Switch server), a Discord server you control, and [Claude Code](https://docs.anthropic.com/en/docs/claude-code) signed in. An Anthropic API key is optional: without one, Kraken uses your Claude Code login.
+**You need:** Python 3.12+, [Switch Console](https://docs.switchagents.ai/switch-rooms/getting-started) with Docker (Console runs the local Switch server), a Discord server you control, and **any one** AI agent or model: Claude Code, Codex, OpenCode, Gemini CLI, or an API key for OpenAI, Gemini, Anthropic or any OpenAI-compatible service (OpenRouter, Groq, a local Ollama, …). Claude is not required.
 
 ### 1. Set up Switch and Discord
 
@@ -96,11 +96,11 @@ python scripts/register.py
 
 It prints `SWITCH_AGENT_ID=...` and `SWITCH_API_KEY=...`. Paste both lines into `.env`.
 
-Leave `ANTHROPIC_API_KEY` empty to use your signed-in Claude Code instead (`KRAKEN_LLM=auto`).
+Kraken also needs a model for its own thinking (spotting conflicts, judging bids). With nothing set, it uses the first agent CLI it finds signed in (Claude Code, Codex, OpenCode or Gemini CLI). To choose, see [Kraken's own model](#krakens-own-model).
 
 ### 4. Create the crew and the rooms (Switch Console → Templates)
 
-1. Run **`templates/kraken-crew.template.yaml`**. It creates `kraken-planner`, `claude-coder`, `claude-coder-2`, `claude-coder-3`, `squall`, `storm-defender` and `storm-coach`.
+1. Run **`templates/kraken-crew.template.yaml`**. Its **provider** field picks the coding agent the crew runs on: `claude` (default), `codex`, `opencode`, or whatever your Console lists. It creates three coders named after that agent (`codex-coder`, `codex-coder-2`, `codex-coder-3` for `codex`; `claude-coder`, … for `claude`) plus `kraken-planner`, `squall`, `storm-defender` and `storm-coach`. The coders join Kraken's crew on their own at the first Charter.
 2. Run **`templates/kraken-hq.template.yaml`**. It creates `#kraken-requests` and `#kraken-hallmark` on your Discord, with Kraken in both.
 3. In `kraken.yaml`, set `people:` to your Discord username(s) and `bridge:` to your Discord bridge's name, so stage rooms show up on Discord with you in them.
 
@@ -128,7 +128,7 @@ Then follow the rooms Kraken opens. Each question says what you can reply.
 ### Check it works
 
 ```bash
-pytest                             # 448 offline tests (fake Switch, fake LLM), no keys needed
+pytest                             # 460 offline tests (fake Switch, fake LLM), no keys needed
 python scripts/smoke.py            # optional live end-to-end check (see below)
 ```
 
@@ -162,6 +162,27 @@ Every step belongs to a person until they say otherwise. When a step needs someo
 
 A handoff covers one step of one request; the next request starts human-first again. Set `human_wait_s: 0` in `kraken.yaml` to always wait for people, or set a step's `autonomy` key to `auto` to always give it to agents.
 
+## Kraken's own model
+
+Besides the crew, Kraken itself thinks a little: Sonar spots conflicting decisions, and the judge picks a bid when a person hands that step over. Any model works. Set `KRAKEN_LLM` in `.env`, or leave it as `auto`:
+
+| `KRAKEN_LLM` | Uses | Set |
+|---|---|---|
+| `auto` (default) | The first one that is set up, in this order: an API key below, then a signed-in agent CLI on your PATH (Claude Code, Codex, OpenCode, Gemini CLI) | nothing |
+| `claude-code` / `codex` / `opencode` / `gemini-cli` | That agent's CLI, already signed in: no API key | optionally `KRAKEN_LLM_MODEL` |
+| `openai` | Any OpenAI-compatible API: OpenAI, OpenRouter, Groq, DeepSeek, Mistral, Kimi, a local Ollama or LM Studio | `KRAKEN_LLM_API_KEY` (or `OPENAI_API_KEY`), `KRAKEN_LLM_BASE_URL` (default OpenAI), `KRAKEN_LLM_MODEL` |
+| `gemini` | Google's Gemini API | `GEMINI_API_KEY`, optionally `KRAKEN_LLM_MODEL` (default `gemini-2.5-flash`) |
+| `api` | Anthropic's API | `ANTHROPIC_API_KEY` |
+| `cli` | Any command you like. The prompt goes on stdin, or wherever you write `{prompt}` | `KRAKEN_LLM_CMD`, e.g. `my-agent --ask {prompt}` |
+
+`KRAKEN_LLM_FAST_MODEL` optionally sets a cheaper model for Sonar's quick "is this a decision?" filter. Agent CLIs run in a fresh, empty folder, so they never touch your files. Examples:
+
+```bash
+KRAKEN_LLM=openai KRAKEN_LLM_BASE_URL=http://localhost:11434/v1 KRAKEN_LLM_MODEL=llama3.1   # local Ollama
+KRAKEN_LLM=gemini GEMINI_API_KEY=...                                                         # Gemini
+KRAKEN_LLM=codex                                                                             # your Codex login
+```
+
 ## Chat commands
 
 Every prompt carries a tag like `[K-12]` and lists the replies it accepts. A leading `@kraken` is optional in stage rooms.
@@ -185,7 +206,7 @@ Every prompt carries a tag like `[K-12]` and lists the replies it accepts. A lea
 
 **Repos.** `@kraken connect <url>` detects Python (FastAPI, Flask, Django), Node (Express, Fastify, Nest, Koa, Hono), Go and Rust; anything else connects too, and `project set` fills in the commands. Each agent clones the repo into its own folder and works on branch `kraken/K-<n>`. Storm attacks from the outside, so the app needs no changes: with a run command it starts the app and injects kills, latency, dropped connections, bad and oversized input, floods, corrupt config and missing environment variables; for a library or CLI it runs the tests under faults and compares with a clean run.
 
-**Agents.** At every Charter Kraken asks Switch for its agents. Any coding agent not yet on the crew (Claude Code, Codex, OpenCode with Gemini, Kimi or Qwen, Antigravity, Cursor, …) becomes a bidder, and Kraken announces it. `@kraken retire <name>` removes one; `charter.auto_join: false` turns this off. If more than 5 bidders are online, Kraken seats a mix of vendors and rotates who gets in.
+**Agents.** Use any vendor for any seat. The crew template's `provider` field sets the vendor for the whole starting crew; to mix, add more agents in Switch Console, or move one into a role with `@kraken enlist <name> as planner` (or `attacker`, `defender`, `coach`). At every Charter Kraken asks Switch for its agents. Any coding agent not yet on the crew (Claude Code, Codex, OpenCode with Gemini, Kimi or Qwen, Antigravity, Cursor, …) becomes a bidder, and Kraken announces it. `@kraken retire <name>` removes one; `charter.auto_join: false` turns this off. If more than 5 bidders are online, Kraken seats a mix of vendors and rotates who gets in.
 
 <details>
 <summary>Configuration (<code>kraken.yaml</code>)</summary>
@@ -204,19 +225,20 @@ Every prompt carries a tag like `[K-12]` and lists the replies it accepts. A lea
 | `charter.never_join` | `[]` | Agent names that never auto-join |
 | `charter.max_bidders` | `5` | Most bidders in one Charter |
 | `projects` / `default_project` | shopfront | Seed repos; more are added from chat and kept in `kraken.db` |
-| `bidders`, `agents.*` | the crew template's names | Initial crew; after the first start the crew lives in `kraken.db` |
+| `bidders` | `[]` | Extra bidders to seed; the crew template's coders join on their own, so this stays empty |
+| `agents.*` | `kraken-planner`, `squall`, `storm-defender`, `storm-coach` | The single seats; after the first start the crew lives in `kraken.db` |
 | `sonar.threshold` | `0.75` | Minimum confidence to raise a conflict |
 | `rooms.requests` / `rooms.hallmark` | `kraken-requests` / `kraken-hallmark` | Room names |
 | `timeouts_s.*` | 15–60 min | Per-stage timeout; on expiry Kraken pings the owner |
 | `db_path` | `kraken.db` | SQLite file for requests, claims and decisions |
 
-Environment variables: `SWITCH_URL`, `SWITCH_AGENT_ID`, `SWITCH_API_KEY` (required); `ANTHROPIC_API_KEY` and `KRAKEN_LLM` (`auto`, `api`, `claude-code`); `SWITCH_REGISTRATION_TOKEN` (registration only); `SMOKE_*`, `DISCORD_RELAY_TOKEN`, `KRAKEN_RELAY_SECRET` (optional extras).
+Environment variables: `SWITCH_URL`, `SWITCH_AGENT_ID`, `SWITCH_API_KEY` (required); `KRAKEN_LLM` and its keys (see [Kraken's own model](#krakens-own-model)); `SWITCH_REGISTRATION_TOKEN` (registration only); `SMOKE_*`, `DISCORD_RELAY_TOKEN`, `KRAKEN_RELAY_SECRET` (optional extras).
 
 </details>
 
 ## What's verified
 
-- **Offline:** 448 tests pass (`pytest`), with fake Switch and fake LLM servers: the state machine, human-first waits and handoffs, auto-join, the command parser, Sonar, Storm faults, repo detection and the Switch client.
+- **Offline:** 460 tests pass (`pytest`), with fake Switch and fake LLM servers: the state machine, human-first waits and handoffs, auto-join, the command parser, Sonar, Storm faults, repo detection and the Switch client.
 - **Live on Discord through Switch:**
   - the full pipeline on the bundled shopfront app;
   - `@kraken connect` and a full build on [fastapi-todo](https://github.com/renceInbox/fastapi-todo) (request K-5), where Storm found and fixed the 64-bit ID crash;

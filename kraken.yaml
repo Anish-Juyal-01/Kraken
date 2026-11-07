@@ -39,7 +39,10 @@ rooms:
   hallmark: kraken-hallmark
 charter:
   max_bidders: 5
-bidders: [claude-coder, claude-coder-2, claude-coder-3]
+# Initial bidders. Empty on purpose: the crew template's coders are named after the
+# agent you pick (claude-coder, codex-coder, ...) and join on their own at the first
+# Charter (charter.auto_join), like any agent you add in Switch later.
+bidders: []
 timeouts_s:
   spark: 1800
   charter: 900

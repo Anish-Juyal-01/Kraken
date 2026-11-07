@@ -26,7 +26,8 @@ def test_repo_config_parses():
     shop = c.projects[0]
     assert shop.name == "shopfront" and shop.code_paths == ["demo/shopfront"]
     assert shop.mode == "http" and shop.chaos_endpoint == "/__chaos" and shop.workdir == "."
-    assert c.bidders == ["claude-coder", "claude-coder-2", "claude-coder-3"]
+    assert c.bidders == []  # the crew template's coders join on their own (auto-join)
+    assert c.charter.auto_join
     assert c.deliver == "pr"
 
 

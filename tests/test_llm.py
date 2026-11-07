@@ -142,6 +142,17 @@ def test_find_cli_uses_native_exe_behind_windows_shim(monkeypatch, tmp_path):
     assert llm_mod.find_claude_cli() == str(exe)
 
 
+_LLM_ENV = ("KRAKEN_LLM", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "KRAKEN_LLM_BASE_URL",
+            "KRAKEN_LLM_API_KEY", "KRAKEN_LLM_CMD", "KRAKEN_LLM_MODEL", "KRAKEN_LLM_FAST_MODEL")
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    for name in _LLM_ENV:
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
 @pytest.mark.parametrize("choice, key, want", [
     (None, "sk-test", ClaudeLLM),
     (None, None, ClaudeCodeLLM),
@@ -149,14 +160,102 @@ def test_find_cli_uses_native_exe_behind_windows_shim(monkeypatch, tmp_path):
     ("claude-code", "sk-test", ClaudeCodeLLM),
     ("api", None, ClaudeLLM),
 ])
-def test_make_llm_picks_backend(monkeypatch, choice, key, want):
+def test_make_llm_picks_backend(clean_env, choice, key, want):
     for name, val in (("KRAKEN_LLM", choice), ("ANTHROPIC_API_KEY", key)):
-        if val is None:
-            monkeypatch.delenv(name, raising=False)
-        else:
-            monkeypatch.setenv(name, val)
-    monkeypatch.setenv("KRAKEN_CLAUDE_BIN", "claude")
+        if val is not None:
+            clean_env.setenv(name, val)
+    clean_env.setenv("KRAKEN_CLAUDE_BIN", "claude")
     assert isinstance(llm_mod.make_llm(), want)
+
+
+@pytest.mark.parametrize("env, url, model", [
+    ({"OPENAI_API_KEY": "k"}, "https://api.openai.com/v1/chat/completions", "gpt-4.1-mini"),
+    ({"GEMINI_API_KEY": "k"}, llm_mod.GEMINI_URL + "/chat/completions", "gemini-2.5-flash"),
+    ({"KRAKEN_LLM_BASE_URL": "http://localhost:11434/v1", "KRAKEN_LLM_MODEL": "llama3.1"},
+     "http://localhost:11434/v1/chat/completions", "llama3.1"),
+])
+def test_auto_picks_any_api_without_claude(clean_env, env, url, model):
+    clean_env.delenv("KRAKEN_CLAUDE_BIN", raising=False)
+    clean_env.setattr(llm_mod.shutil, "which", lambda _: None)  # no Claude Code installed
+    for k, v in env.items():
+        clean_env.setenv(k, v)
+    got = llm_mod.make_llm()
+    assert isinstance(got, llm_mod.OpenAICompatLLM)
+    assert got._url == url and got._model(SMART) == model
+
+
+@pytest.mark.parametrize("choice, binary, head", [
+    ("codex", "codex", ["codex", "exec", "--skip-git-repo-check", "-"]),
+    ("opencode", "opencode", ["opencode", "run"]),
+    ("gemini-cli", "gemini", ["gemini", "-p"]),
+])
+def test_agent_cli_backends(clean_env, choice, binary, head):
+    clean_env.setenv("KRAKEN_LLM", choice)
+    clean_env.setattr(llm_mod.shutil, "which", lambda name: name if name == binary else None)
+    got = llm_mod.make_llm()
+    assert isinstance(got, llm_mod.AgentCLILLM) and got._argv[:len(head)] == head
+
+
+def test_auto_falls_back_to_any_installed_agent_cli(clean_env):
+    clean_env.delenv("KRAKEN_CLAUDE_BIN", raising=False)
+    clean_env.setattr(llm_mod.shutil, "which", lambda name: name if name == "opencode" else None)
+    assert llm_mod.make_llm()._argv[:2] == ["opencode", "run"]
+
+
+def test_nothing_set_up_says_what_to_do(clean_env):
+    clean_env.delenv("KRAKEN_CLAUDE_BIN", raising=False)
+    clean_env.setattr(llm_mod.shutil, "which", lambda _: None)
+    with pytest.raises(llm_mod.LLMError, match="needs a model"):
+        llm_mod.make_llm()
+
+
+async def test_openai_compat_request_and_model_mapping():
+    import httpx
+
+    seen = []
+
+    def reply(request):
+        seen.append(json.loads(request.content))
+        assert request.headers["authorization"] == "Bearer k"
+        return httpx.Response(200, json={"choices": [
+            {"finish_reason": "stop", "message": {"content": '```json\n{"ok": true}\n```'}}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(reply))
+    llm = llm_mod.OpenAICompatLLM("https://x/v1/", "k", "big", "small", client=client)
+    assert (await llm.json(SMART, "sys", "usr", OkModel)).ok is True
+    assert (await llm.json(FAST, "sys", "usr", OkModel)).ok is True
+    assert [b["model"] for b in seen] == ["big", "small"]
+    assert seen[0]["messages"] == [{"role": "system", "content": "sys"}, {"role": "user", "content": "usr"}]
+
+
+async def test_openai_compat_errors_and_truncation():
+    import httpx
+
+    replies = [httpx.Response(200, json={"choices": [{"finish_reason": "length", "message": {"content": "{"}}]}),
+               httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": '{"ok": false}'}}]}),
+               httpx.Response(429, text="quota")]
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: replies.pop(0)))
+    llm = llm_mod.OpenAICompatLLM("https://x/v1", None, "m", client=client)
+    assert (await llm.json(SMART, "s", "u", OkModel)).ok is False  # truncated once, retried
+    with pytest.raises(llm_mod.LLMError, match="429"):
+        await llm.json(SMART, "s", "u", OkModel)
+
+
+async def test_agent_cli_reads_json_out_of_a_chatty_reply():
+    banner = '\x1b[0m> build · gemini-3.8-flash\n\nSure! Here it is:\n{"ok": true}\n'
+    run = FakeRunner((0, banner, ""))
+    assert (await llm_mod.AgentCLILLM(["opencode", "run"], runner=run).json(SMART, "SYS", "USR", OkModel)).ok
+    argv, stdin = run.calls[0]
+    assert argv == ["opencode", "run"] and "SYS" in stdin and "USR" in stdin  # prompt on stdin
+
+
+async def test_agent_cli_prompt_placeholder_and_failure():
+    run = FakeRunner((0, '{"ok": true}', ""))
+    await llm_mod.AgentCLILLM(["my-agent", "--ask", "{prompt}"], runner=run).json(FAST, "S", "U", OkModel)
+    argv, stdin = run.calls[0]
+    assert "U" in argv[2] and stdin == ""
+    with pytest.raises(llm_mod.LLMError, match="exited 1"):
+        await llm_mod.AgentCLILLM(["x"], runner=FakeRunner((1, "", "not signed in"))).json(FAST, "s", "u", OkModel)
 
 
 def test_make_llm_rejects_unknown(monkeypatch):

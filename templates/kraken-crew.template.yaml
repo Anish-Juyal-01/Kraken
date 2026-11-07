@@ -5,15 +5,25 @@
 # branch and commit without touching your checkout or each other. Every agent
 # accepts mentions from anyone, because Kraken wakes them by @-mention.
 #
-# The names match the seed roster in kraken.yaml. Add more vendors later from
-# chat: `@kraken enlist <agent>` (see "Crew" in the README).
+# The coders are named after the provider you pick (claude-coder, codex-coder,
+# opencode-coder, ...) and join Kraken's crew on their own at the first Charter.
+# The other seats (kraken-planner, squall, storm-defender, storm-coach) keep
+# their names, which match `agents:` in kraken.yaml.
 #
-# Every crew member runs on Claude Code. The provider is fixed rather than a
-# param because Switch Console 0.40.1 on Windows cannot list providers for a
-# template form (it probes this computer over SSH), which blocks the form.
+# Pick the coding agent the crew runs on with the `provider` param: claude
+# (Claude Code, the default), codex, opencode, or any other provider your
+# Switch Console lists. It is a plain text field rather than a provider picker
+# because Switch Console 0.40.1 on Windows cannot list providers for a template
+# form (it probes this computer over SSH), which blocks the form. Mixing
+# vendors: run this once, then add more agents in Console; they join the crew
+# on their own.
 version: 1
 
 params:
+  provider:
+    type: string
+    description: The coding agent every crew member runs on, as Switch Console names it (claude, codex, opencode, ...).
+    default: claude
   location:
     type: location
     description: The machine the crew runs on.
@@ -36,7 +46,7 @@ agents:
     description: Spark — turns a request into a brief with acceptance criteria
     addressing: anyone
     auto_mode: true
-    provider: claude
+    provider: "{provider}"
     location: "{location}"
     directory: "{directory}"
     repo: "{repo}"
@@ -47,12 +57,12 @@ agents:
       `brief`, then post `BRIEF READY` on its own line. Keep briefs short and
       testable.
 
-  - name: claude-coder
-    display_name: Claude Coder
+  - name: "{provider}-coder"
+    display_name: "Coder ({provider})"
     description: Charter bidder; builds in Forge when it wins, reviews when it loses
     addressing: anyone
     auto_mode: true
-    provider: claude
+    provider: "{provider}"
     location: "{location}"
     directory: "{directory}"
     repo: "{repo}"
@@ -68,23 +78,23 @@ agents:
       criterion is met. Push or open a pull request only when Kraken asks you to
       in the room, after a person approved it.
 
-  - name: claude-coder-2
-    display_name: Claude Coder 2
+  - name: "{provider}-coder-2"
+    display_name: "Coder 2 ({provider})"
     description: Charter bidder; builds in Forge when it wins, reviews when it loses
     addressing: anyone
     auto_mode: true
-    provider: claude
+    provider: "{provider}"
     location: "{location}"
     directory: "{directory}"
     repo: "{repo}"
     instructions: *coder
 
-  - name: claude-coder-3
-    display_name: Claude Coder 3
+  - name: "{provider}-coder-3"
+    display_name: "Coder 3 ({provider})"
     description: Charter bidder; builds in Forge when it wins, reviews when it loses
     addressing: anyone
     auto_mode: true
-    provider: claude
+    provider: "{provider}"
     location: "{location}"
     directory: "{directory}"
     repo: "{repo}"
@@ -95,7 +105,7 @@ agents:
     description: Storm attacker — injects faults into the project under test
     addressing: anyone
     auto_mode: true
-    provider: claude
+    provider: "{provider}"
     location: "{location}"
     directory: "{directory}"
     repo: "{repo}"
@@ -113,7 +123,7 @@ agents:
     description: Storm defender — diagnoses and patches what Squall breaks
     addressing: anyone
     auto_mode: true
-    provider: claude
+    provider: "{provider}"
     location: "{location}"
     directory: "{directory}"
     repo: "{repo}"
@@ -128,7 +138,7 @@ agents:
     description: Storm coach — scores the round and calls the result
     addressing: anyone
     auto_mode: true
-    provider: claude
+    provider: "{provider}"
     location: "{location}"
     directory: "{directory}"
     repo: "{repo}"

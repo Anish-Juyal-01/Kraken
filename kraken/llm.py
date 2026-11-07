@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -12,6 +13,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import anthropic
+    import httpx
 from pydantic import BaseModel, ValidationError
 
 FAST = "claude-haiku-5-5"
@@ -152,14 +154,193 @@ class ClaudeCodeLLM(_JsonLLM):
         return data.get("result") or ""
 
 
-def make_llm() -> _JsonLLM:
-    """Pick the backend from KRAKEN_LLM: `api`, `claude-code`, or unset/`auto`.
+# ---- any other model or agent -------------------------------------------------------
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
-    Auto uses the API when ANTHROPIC_API_KEY is set, else the Claude Code CLI.
+
+def _extract_json(text: str) -> str:
+    """The JSON in a reply that may carry extra lines (CLI banners, colour codes, prose)."""
+    text = _strip_fence(_ANSI.sub("", text))
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        pass
+    for open_, close in (("{", "}"), ("[", "]")):
+        a, b = text.find(open_), text.rfind(close)
+        if a != -1 and b > a:
+            chunk = text[a:b + 1]
+            try:
+                json.loads(chunk)
+                return chunk
+            except json.JSONDecodeError:
+                continue
+    return text
+
+
+class LLMError(RuntimeError):
+    """A model API or agent CLI failed."""
+
+
+class _AnyModel(_JsonLLM):
+    """Kraken asks for Claude model names (FAST/SMART); other backends map them to their own."""
+
+    def __init__(self, model: str | None, fast_model: str | None) -> None:
+        self._smart = model
+        self._fast = fast_model or model
+
+    def _model(self, asked: str) -> str | None:
+        if not asked.startswith("claude-"):
+            return asked
+        return self._fast if asked == FAST else self._smart
+
+    async def _parse(self, model: str, system: str, user: str, schema: type[T]) -> T:
+        return schema.model_validate_json(_extract_json(await self._ask(model, system, user)))
+
+
+class OpenAICompatLLM(_AnyModel):
+    """Any OpenAI-compatible chat API: OpenAI, Gemini, OpenRouter, Groq, DeepSeek, Mistral,
+    Kimi, a local Ollama or LM Studio, and so on."""
+
+    def __init__(self, base_url: str, api_key: str | None, model: str, fast_model: str | None = None,
+                 client: "httpx.AsyncClient | None" = None) -> None:
+        super().__init__(model, fast_model)
+        if client is None:
+            import httpx
+
+            client = httpx.AsyncClient(timeout=CLI_TIMEOUT_S)
+        self._url = base_url.rstrip("/") + "/chat/completions"
+        self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._client = client
+
+    async def _ask(self, model: str, system: str, user: str) -> str:
+        body = {"model": self._model(model), "messages": [
+            {"role": "system", "content": system}, {"role": "user", "content": user}]}
+        resp = await self._client.post(self._url, json=body, headers=self._headers)
+        if resp.status_code >= 400:
+            raise LLMError(f"{self._url} answered {resp.status_code}: {resp.text[:300]}")
+        choice = resp.json()["choices"][0]
+        if choice.get("finish_reason") not in (None, "stop"):
+            raise _Incomplete(f"reply stopped early (finish_reason={choice.get('finish_reason')})")
+        return choice["message"].get("content") or ""
+
+
+# Coding-agent CLIs that read a prompt on stdin and print the reply. The prompt never goes
+# on the command line, so Windows npm shims can't mangle it.
+CLI_PRESETS: dict[str, list[str]] = {
+    "codex": ["codex", "exec", "--skip-git-repo-check", "-"],
+    "opencode": ["opencode", "run"],
+    "gemini-cli": ["gemini", "-p", "Follow the instructions above and reply with JSON only."],
+}
+
+
+def _find(name: str) -> str | None:
+    found = shutil.which(name)
+    if found and os.name == "nt":  # npm shim: prefer the native binary next to it
+        mods = Path(found).parent / "node_modules"
+        for exe in (mods / f"{name}-ai" / "bin" / f"{name}.exe", mods / name / "bin" / f"{name}.exe"):
+            if exe.is_file():
+                return str(exe)
+    return found
+
+
+class AgentCLILLM(_AnyModel):
+    """Any coding agent's CLI in one-shot mode (Codex, OpenCode, Gemini CLI, or a command of
+    your own). It runs in a fresh empty folder, so there are no project files to touch."""
+
+    def __init__(self, argv: list[str], model: str | None = None, runner: Runner | None = None) -> None:
+        super().__init__(model, None)
+        if not argv:
+            raise LLMError("empty agent command: set KRAKEN_LLM_CMD")
+        exe = argv[0] if runner is not None else _find(argv[0])
+        if not exe:
+            raise LLMError(f"{argv[0]} not found on PATH; install it or set KRAKEN_LLM_CMD")
+        self._argv = [exe, *argv[1:]]
+        self._run = runner or _run_in_empty_dir
+
+    async def _ask(self, model: str, system: str, user: str) -> str:
+        prompt = (f"{system}\n\n---\n\n{user}\n\n---\nReply with the JSON object only: no tools, "
+                  "no files, no explanation.")
+        argv = list(self._argv)
+        if any("{prompt}" in a for a in argv):
+            argv, prompt = [a.replace("{prompt}", prompt) for a in argv], ""
+        code, out, err = await self._run(argv, prompt)
+        if code != 0 and not out.strip():
+            raise LLMError(f"{argv[0]} exited {code}: {(err or out).strip()[:300]}")
+        return out
+
+
+async def _run_in_empty_dir(argv: list[str], stdin: str) -> tuple[int, str, str]:
+    with tempfile.TemporaryDirectory(prefix="kraken-llm-") as cwd:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, cwd=cwd)
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(stdin.encode("utf-8")), CLI_TIMEOUT_S)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise LLMError(f"{argv[0]} timed out after {CLI_TIMEOUT_S}s") from None
+    return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+OPENAI_URL = "https://api.openai.com/v1"
+BACKENDS = ("auto", "api", "claude-code", "openai", "gemini", "codex", "opencode", "gemini-cli", "cli")
+
+
+def _auto(env) -> str:
+    if env("ANTHROPIC_API_KEY"):
+        return "api"
+    if env("KRAKEN_LLM_BASE_URL") or env("KRAKEN_LLM_API_KEY") or env("OPENAI_API_KEY"):
+        return "openai"
+    if env("GEMINI_API_KEY"):
+        return "gemini"
+    if env("KRAKEN_LLM_CMD"):
+        return "cli"
+    if env("KRAKEN_CLAUDE_BIN") or find_claude_cli():
+        return "claude-code"
+    for name, cmd in (("codex", "codex"), ("opencode", "opencode"), ("gemini-cli", "gemini")):
+        if shutil.which(cmd):
+            return name
+    raise LLMError("Kraken needs a model: set an API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, "
+                   "GEMINI_API_KEY or KRAKEN_LLM_BASE_URL) or install an agent CLI "
+                   "(claude, codex, opencode, gemini). See the README.")
+
+
+def make_llm() -> _JsonLLM:
+    """Pick Kraken's own model from KRAKEN_LLM (README: "Kraken's own model").
+
+    api          Anthropic API (ANTHROPIC_API_KEY)
+    claude-code  your signed-in Claude Code CLI
+    openai       any OpenAI-compatible API: KRAKEN_LLM_BASE_URL (default OpenAI),
+                 KRAKEN_LLM_API_KEY (or OPENAI_API_KEY), KRAKEN_LLM_MODEL
+    gemini       Google's Gemini API (GEMINI_API_KEY)
+    codex, opencode, gemini-cli   that agent's signed-in CLI
+    cli          any command: KRAKEN_LLM_CMD (prompt on stdin, or wherever `{prompt}` is)
+    auto         (default) the first one set up: an API key, then an agent CLI on PATH
     """
-    choice = (os.environ.get("KRAKEN_LLM") or "auto").strip().lower()
-    if choice == "api" or (choice == "auto" and os.environ.get("ANTHROPIC_API_KEY")):
+    env = os.environ.get
+    choice = (env("KRAKEN_LLM") or "auto").strip().lower()
+    if choice not in BACKENDS:
+        raise ValueError(f"KRAKEN_LLM must be one of {', '.join(BACKENDS)}, not {choice!r}")
+    if choice == "auto":
+        choice = _auto(env)
+    model, fast = env("KRAKEN_LLM_MODEL"), env("KRAKEN_LLM_FAST_MODEL")
+    if choice == "api":
         return ClaudeLLM()
-    if choice in ("auto", "claude-code"):
+    if choice == "claude-code":
         return ClaudeCodeLLM()
-    raise ValueError(f"KRAKEN_LLM must be api, claude-code or auto, not {choice!r}")
+    if choice == "openai":
+        return OpenAICompatLLM(env("KRAKEN_LLM_BASE_URL") or OPENAI_URL,
+                               env("KRAKEN_LLM_API_KEY") or env("OPENAI_API_KEY"),
+                               model or "gpt-4.1-mini", fast)
+    if choice == "gemini":
+        return OpenAICompatLLM(GEMINI_URL, env("GEMINI_API_KEY") or env("KRAKEN_LLM_API_KEY"),
+                               model or "gemini-2.5-flash", fast)
+    if choice == "cli":
+        return AgentCLILLM(shlex.split(env("KRAKEN_LLM_CMD") or "", posix=os.name != "nt"), model)
+    argv = list(CLI_PRESETS[choice])
+    if model:
+        argv += ["-m", model]
+    return AgentCLILLM(argv, model)
