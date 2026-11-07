@@ -6,7 +6,7 @@ Kraken is a crew of AI agents that lives in your team chat (Discord, through [Sw
 
 Built for the **Flip the Switch hackathon** (WeMakeDevs, Nov 4–7 2026), **Track 01: Best Business Workflow**.
 
-- 🎬 **Demo video:** _add the link here_
+- 🎬 **Demo video:** <https://youtu.be/o_IiLbg4gio>
 - 📦 **Repo:** <https://github.com/Anish-Juyal-01/Kraken>
 
 ---
