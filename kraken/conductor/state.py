@@ -16,7 +16,7 @@ _GATE_KINDS = {"approve", "reject", "pick"}
 _STAGE_ROOMS = {"RESOLVING": "sonar-resolution"}
 _RETRYABLE = ("SPARK", "CHARTER", "FORGE", "STORM")
 _NO_REASON = "no reason given"
-_PR_QUESTION = "Storm survived. Open a pull request?"
+_PR_QUESTION = "Storm survived. Open a pull request? (No time limit: a person decides.)"
 
 
 class Signal(BaseModel):
@@ -76,6 +76,14 @@ def _sig(inp: Signal | Command) -> dict:
     return inp.data if isinstance(inp, Signal) else {}
 
 
+def _yours(cfg: Config, text: str) -> str:
+    """A human gate's question, saying the person decides first and for how long."""
+    if cfg.human_wait_s <= 0:
+        return f"{text} ⏳ Your call."
+    mins = max(1, round(cfg.human_wait_s / 60))
+    return f"{text} ⏳ Your call: reply within {mins} min, or the agent takes over (🤖 hands it over now)."
+
+
 def _ask(req: Request, gate: str, text: str, accepts: list[str], extra: dict | None = None) -> Result:
     return {**(extra or {}), "data": _data(req, gate)}, [_post(prompt(req.id, text, accepts))]
 
@@ -84,7 +92,7 @@ def _ask(req: Request, gate: str, text: str, accepts: list[str], extra: dict | N
 def _brief_posted(req, cfg, inp):
     brief = _sig(inp)["brief"]
     if cfg.autonomy["brief"] == "human":
-        return _ask(req, "brief", "Brief ready.", _APPROVE_REJECT, {"brief": brief})
+        return _ask(req, "brief", _yours(cfg, "Brief ready."), _APPROVE_REJECT, {"brief": brief})
     return {"brief": brief, "state": "PREFLIGHT"}, [_post("running Sonar pre-flight")]
 
 
@@ -126,7 +134,7 @@ def _bids_closed(req, cfg, inp):
         return {}, [_ping(req, "no bids received")]
     if cfg.autonomy["pick"] == "human":
         accepts = [f"{_KEYCAPS[i]} {b['agent']}" for i, b in enumerate(req.bids[:len(_KEYCAPS)])]
-        upd, posts = _ask(req, "pick", "Bids are in. Pick one.", accepts)
+        upd, posts = _ask(req, "pick", _yours(cfg, "Bids are in. Pick one."), accepts)
         if len(req.bids) > len(_KEYCAPS):
             posts = [_post(posts[0].text + "\n…or reply pick <name>")]
         return upd, posts
@@ -157,8 +165,10 @@ def _proceed_after_merge(req):
 
 
 def _accepted(req, cfg, inp):
+    if req.data.get("gate") == "merge":
+        return {}, []  # a second reviewer's ACCEPTED: the merge question is already out (live K-7)
     if cfg.autonomy["merge"] == "human":
-        return _ask(req, "merge", "Reviewers accepted. Merge?", _APPROVE_REJECT)
+        return _ask(req, "merge", _yours(cfg, "Reviewers accepted. Merge?"), _APPROVE_REJECT)
     return _proceed_after_merge(req)
 
 
@@ -189,7 +199,7 @@ def _after_storm(req, cfg):
 
 def _survived(req, cfg, inp):
     if cfg.autonomy["storm_result"] == "human":
-        return _ask(req, "storm_result", "Storm survived. Accept?", _APPROVE_REJECT)
+        return _ask(req, "storm_result", _yours(cfg, "Storm survived. Accept?"), _APPROVE_REJECT)
     return _after_storm(req, cfg)
 
 

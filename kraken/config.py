@@ -109,7 +109,7 @@ class Config(BaseModel):
     # Human first, but nobody waits forever: if no person replies to a step for this many
     # seconds, Kraken hands it to the agent (as if someone replied 🤖). 0 = wait for people.
     # The pull request is never handed off.
-    human_wait_s: int = Field(default=300, ge=0)
+    human_wait_s: int = Field(default=120, ge=0)
     # Agents sometimes go quiet mid-stage (a session ends without a hand-off). If a stage
     # room where agents are working has no message for this long, Kraken asks the agent
     # it waits on for a status, once per quiet spell. 0 = never nudge.

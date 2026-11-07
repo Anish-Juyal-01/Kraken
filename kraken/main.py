@@ -17,7 +17,7 @@ from kraken.sonar.code_check import index_code
 from kraken.switch_client import SwitchClient
 
 log = logging.getLogger("kraken")
-TICK_SECONDS = 60
+TICK_SECONDS = 10  # human waits are short (human_wait_s), so check often
 
 
 def load_env(path: str = ".env") -> None:

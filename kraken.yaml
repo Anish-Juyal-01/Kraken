@@ -28,7 +28,7 @@ storm:
 # Set a key to auto to hand that step to agents for every request.
 # If no person replies for human_wait_s, Kraken hands the step to the agent itself
 # (0 = always wait). The pull request is never handed off.
-human_wait_s: 300
+human_wait_s: 120
 autonomy:
   brief: human
   pick: human

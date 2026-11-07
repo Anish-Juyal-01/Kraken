@@ -149,7 +149,7 @@ Every step is a person's by default. Hand one to an agent when you don't want to
 | **Storm** | Drill: Squall breaks things, you fix them, the coach scores you | `storm-defender`: it switches the round to auto and patches the faults |
 | **Pull request** | You approve it | Nobody: nothing leaves the chat without a person |
 
-Nobody waits forever: if no person replies to a step for `human_wait_s` (default 300 seconds), Kraken hands it to the agent itself and says so in the room. Any message from a person in the step's room restarts the clock; `human_wait_s: 0` always waits. The pull request is never handed off.
+Nobody waits forever: if no person replies to a step for `human_wait_s` (default 120 seconds), Kraken hands it to the agent itself and says so in the room. Any message from a person in the step's room restarts the clock; `human_wait_s: 0` always waits. The pull request is never handed off.
 
 Every handoff is announced in the room and recorded on the request (`handoff`, `handoff_by`). To hand a step to agents for every request, set its `autonomy` key to `auto`, or `storm.default_mode: auto`.
 

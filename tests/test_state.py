@@ -189,7 +189,8 @@ def test_charter_bids_done_human_prompt():
     for kind in ("bids_done", "timeout"):
         upd, acts = step(r, Config(), Signal(kind=kind))
         assert upd["data"]["gate"] == "pick" and "state" not in upd
-        assert acts[0].text == "[K-1] Bids are in. Pick one.\n1️⃣ a · 2️⃣ b"
+        assert acts[0].text.startswith("[K-1] Bids are in. Pick one. ⏳ Your call: reply within 2 min")
+        assert acts[0].text.endswith("\n1️⃣ a · 2️⃣ b")
 
 
 def test_charter_bids_done_auto():

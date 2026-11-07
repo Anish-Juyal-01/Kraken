@@ -139,34 +139,67 @@ class Dispatcher:
                 log.exception("reaction receipt for K-%s failed", tag)
             return await self._command(cmd, None)
 
-    def _waiting_on_people(self, req: Request) -> bool:
-        """True while this request's current step needs a person who hasn't acted yet."""
+    def _human_wait(self, req: Request) -> tuple[str, float] | None:
+        """(what, since) while a person has been asked for something and hasn't answered.
+        The clock starts when the person is asked, never when the stage merely opens."""
         if req.state not in _STAGE_NAMES or req.state in req.data.get("handoff", []):
-            return False
-        gate = req.data.get("gate")
-        if req.state == "SPARK":
-            return gate in (None, "brief")  # answering the planner, or approving the brief
-        if req.state == "STORM" and req.storm_mode == "drill" and "storm" in req.rooms:
-            return gate in (None, "storm_result")
-        return gate is not None and gate == STAGE_GATE.get(req.state)
+            return None
+        d, gate = req.data, req.data.get("gate")
+        if gate and gate == STAGE_GATE.get(req.state):  # approve the brief, pick, merge OK, accept
+            return "gate", d.get("gate_since") or d.get("stage_started") or 0.0
+        if (req.state == "SPARK" and gate is None and d.get("asked_at") is not None
+                and not d.get("answers_handed")):
+            return "answers", d["asked_at"]  # the planner asked the owner something
+        if (req.state == "STORM" and req.storm_mode == "drill" and gate is None
+                and d.get("defend_since") is not None and not d.get("defend_handed")):
+            return "defend", d["defend_since"]  # Squall broke things: the people's turn to fix
+        return None
+
+    def _waiting_on_people(self, req: Request) -> bool:
+        return self._human_wait(req) is not None
+
+    def _wait_note(self, what: str) -> str:
+        mins = max(1, round(self.cfg.human_wait_s / 60))
+        if self.cfg.human_wait_s <= 0:
+            return f"⏳ Your call: {what}."
+        return f"⏳ Your call: {what}. Reply within {mins} min, or the agent takes over (🤖 hands it over now)."
 
     async def _auto_handoffs(self, now: float) -> None:
         """Human first, but nobody waits forever: after human_wait_s with no reply from a
-        person, hand the step to its agent, as if someone had replied 🤖."""
+        person, the agent takes over that one thing, and Kraken says so in the room."""
         wait = self.cfg.human_wait_s
         if wait <= 0:
             return
+        who = f"Kraken (no reply from a person in {max(1, round(wait / 60))} min)"
         for req in self.ledger.open_requests():
-            if not self._waiting_on_people(req):
+            hw = self._human_wait(req)
+            if hw is None:
                 continue
-            marks = [req.data[k] for k in ("stage_started", "gate_since", "human_at")
-                     if req.data.get(k) is not None]
-            if marks and now - max(marks) > wait:
-                who = f"Kraken (no reply from a person in {round(wait / 60)} min)"
-                try:
+            what, since = hw
+            since = max(since, req.data.get("human_at") or 0.0)  # a person's reply restarts it
+            if now - since <= wait:
+                continue
+            try:
+                if what == "gate":
                     await self._handoff(req, Command(kind="handoff", tag=req.id, user=who))
-                except Exception:
-                    log.exception("auto handoff failed for K-%s", req.id)
+                elif what == "answers":
+                    merge_data(self.ledger, req.id, answers_handed=True,
+                               handoff_by={**req.data.get("handoff_by", {}), "SPARK answers": who})
+                    await self.runner.say(
+                        req, f"@{self.crew.primary('planner')} [K-{req.id}] {who}: decide the open "
+                        "answers yourself, list them under Assumptions in the brief, then write it. "
+                        "The brief still goes to a person for approval.", "spark")
+                else:  # defend
+                    self.ledger.update_request(req.id, storm_mode="auto")
+                    merge_data(self.ledger, req.id, defend_handed=True,
+                               handoff_by={**req.data.get("handoff_by", {}), "STORM defending": who})
+                    await self.runner.say(
+                        req, f"@{self.crew.primary('defender')} [K-{req.id}] {who}: you defend now "
+                        "(auto mode). Fix what the faults broke, commit, then post your verdict and "
+                        f"mention @{self.crew.primary('coach')}. The result still goes to a person.",
+                        "storm")
+            except Exception:
+                log.exception("auto handoff failed for K-%s", req.id)
 
     def _waited_on_agents(self, req: Request) -> tuple[str, list[str]] | None:
         """(stage room, agents Kraken is waiting on) while agents should be working."""
@@ -207,6 +240,31 @@ class Dispatcher:
                     "left off, and when you hand off, post it here and mention the next agent.", room)
             except Exception:
                 log.exception("nudge for K-%s failed", req.id)
+
+    async def _note_asks(self, rid: int, room_id: str, sender: str, body: str) -> None:
+        """An agent just asked the people for something: start their clock and tell them."""
+        req = self.ledger.get_request(rid)
+        stage = next((s for s, r in req.rooms.items() if r == room_id), None)
+        d, now = req.data, time.time()
+        if req.state in d.get("handoff", []) or d.get("gate"):
+            return
+        lines = [ln.strip() for ln in body.splitlines()]
+        if (stage == "spark" and req.state == "SPARK" and sender == self.crew.primary("planner")
+                and "?" in body and "BRIEF READY" not in lines and not d.get("answers_handed")
+                and (d.get("asked_at") is None or (d.get("human_at") or 0) > d["asked_at"])):
+            merge_data(self.ledger, rid, asked_at=now)
+            await self.runner.say(req, f"@{req.owner} [K-{req.id}] the planner is asking you "
+                                       "something (above). " + self._wait_note("answer it here"),
+                                  "spark")
+        elif (stage == "storm" and req.state == "STORM" and req.storm_mode == "drill"
+              and sender == self.crew.primary("attacker") and d.get("defend_since") is None
+              and f"@{self.crew.primary('defender')}" in body):
+            merge_data(self.ledger, rid, defend_since=now)
+            people = " ".join(f"@{p}" for p in self.cfg.people)
+            await self.runner.say(
+                req, f"{people} [K-{req.id}] Squall has broken things (above): it's your turn to "
+                f"defend. Fix them on kraken/K-{req.id}, then tell @{self.crew.primary('coach')} "
+                "you're done. " + self._wait_note("defend"), "storm")
 
     async def tick(self, now: float) -> None:
         async with self._lock:
@@ -261,6 +319,8 @@ class Dispatcher:
             merge_data(self.ledger, rid, active_at=time.time())  # someone is working here
             if not known_agent:
                 merge_data(self.ledger, rid, human_at=time.time())  # a person: reset the wait
+            else:
+                await self._note_asks(rid, ev.room_id, name, body)
         cmd = None if known_agent else parse(body, user=name)
         if cmd is not None and cmd.kind in (*_CREW_KINDS, *_PROJECT_KINDS):
             if ev.room_id != self.room_ids.get(self.cfg.rooms.requests):
@@ -430,6 +490,8 @@ class Dispatcher:
         stage = req.state
         room = stage_room(stage)
         name = _STAGE_NAMES.get(stage)
+        if stage == "STORM" and req.data.get("gate") == "storm_result":
+            name = "Storm (accepting the result)"
         if name is None:
             why = ("The pull request always needs a person: reply approve or reject."
                    if stage == "DELIVER" else "That step needs a person.")

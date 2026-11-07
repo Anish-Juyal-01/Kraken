@@ -131,25 +131,100 @@ async def test_no_reply_in_time_hands_the_pick_to_the_judge(ledger):
     assert any("handed to the agent by Kraken" in t for t in client.texts("ch"))
 
 
-async def test_a_human_reply_resets_the_wait(ledger):
-    client, d = make(ledger, human_wait_s=300)
+async def test_a_slow_planner_never_hands_spark_off_before_anyone_is_asked(ledger):
+    client, d = make(ledger, human_wait_s=120)
     rid = request_in(ledger, "SPARK", rooms={"spark": "sp"}, data={"stage_started": 0.0})
-    await d.handle(ev(1, "it should only cover the v2 routes", room="sp", name="sam"))
+    await d.tick(10_000)  # the planner is still reading the code: nobody has been asked
+    req = ledger.get_request(rid)
+    assert "handoff" not in req.data and not req.data.get("answers_handed")
+
+
+async def test_planner_question_asks_the_owner_first_then_the_planner_decides(ledger):
+    import time as _t
+    client, d = make(ledger, human_wait_s=120)
+    rid = request_in(ledger, "SPARK", rooms={"spark": "sp"}, data={"stage_started": 0.0})
+    await d.handle(ev(1, "Should /v2/ping also report the version?", room="sp", name="kraken-planner"))
+    req = ledger.get_request(rid)
+    asked = req.data["asked_at"]
+    note = client.texts("sp")[-1]
+    assert note.startswith("@sam [K-1] the planner is asking you something")
+    assert "reply within 2 min, or the agent takes over" in note.replace("Reply", "reply")
+    await d.handle(ev(2, "no, just pong", room="sp", name="sam"))  # the owner answers in time
     human_at = ledger.get_request(rid).data["human_at"]
-    await d.tick(human_at + 200)
-    assert "handoff" not in ledger.get_request(rid).data  # sam answered recently
-    await d.tick(human_at + 301)
-    assert ledger.get_request(rid).data["handoff"] == ["SPARK"]
-    assert "decide them yourself" in client.texts("sp")[-1]
+    await d.tick(human_at + 100)
+    assert not ledger.get_request(rid).data.get("answers_handed")
+    # a second question restarts the person's turn; silence then hands it to the planner
+    await d.handle(ev(3, "And should it skip the rate limit?", room="sp", name="kraken-planner"))
+    second = ledger.get_request(rid).data["asked_at"]
+    assert second > asked
+    await d.tick(second + 121)
+    req = ledger.get_request(rid)
+    assert req.data["answers_handed"] and "SPARK answers" in req.data["handoff_by"]
+    assert "decide the open answers yourself" in client.texts("sp")[-1]
+    assert "handoff" not in req.data  # the brief is NOT handed off: a person still approves it
 
 
-async def test_drill_storm_hands_defending_over_after_the_wait(ledger):
-    client, d = make(ledger, human_wait_s=60)
+async def test_after_spark_answers_are_handed_off_the_brief_still_waits_for_a_person(ledger):
+    client, d = make(ledger, human_wait_s=120)
+    rid = request_in(ledger, "SPARK", rooms={"spark": "sp"}, brief="B",
+                     data={"gate": "brief", "gate_since": 1000.0, "answers_handed": True})
+    await d.tick(1000 + 119)
+    assert ledger.get_request(rid).state == "SPARK"  # its own fresh 2 minutes
+    await d.tick(1000 + 121)
+    assert ledger.get_request(rid).state in ("PREFLIGHT", "CHARTER")
+
+
+async def test_drill_storm_waits_for_squall_then_gives_people_their_turn(ledger):
+    client, d = make(ledger, human_wait_s=120, people=["anish_2007"])
     rid = request_in(ledger, "STORM", rooms={"storm": "st"}, storm_mode="drill",
                      data={"stage_started": 0.0})
-    await d.tick(61)
+    await d.tick(10_000)  # Squall is still attacking: nothing to defend yet
+    assert ledger.get_request(rid).storm_mode == "drill"
+    await d.handle(ev(1, "3 faults done, /v2/ping 500s on bad input. @storm-defender @storm-coach",
+                      room="st", name="squall"))
     req = ledger.get_request(rid)
-    assert req.storm_mode == "auto" and req.data["handoff"] == ["STORM"]
+    since = req.data["defend_since"]
+    note = client.texts("st")[-1]
+    assert note.startswith("@anish_2007 [K-1] Squall has broken things") and "within 2 min" in note
+    await d.tick(since + 119)
+    assert ledger.get_request(rid).storm_mode == "drill"
+    await d.tick(since + 121)
+    req = ledger.get_request(rid)
+    assert req.storm_mode == "auto" and req.data["defend_handed"]
+    assert client.texts("st")[-1].startswith("@storm-defender [K-1] Kraken (no reply from a person in 2 min)")
+    assert "handoff" not in req.data  # the coach's result still goes to a person
+
+
+async def test_gate_questions_say_the_person_decides_first(ledger):
+    client, d = make(ledger, human_wait_s=120)
+    rid = request_in(ledger, "FORGE", rooms={"forge": "fg"}, winner="claude-coder",
+                     bids=[{"agent": "claude-coder"}, {"agent": "codex-coder"}])
+    await d.handle(ev(1, "ok\nACCEPTED", room="fg", name="codex-coder"))
+    q = client.texts("fg")[-1]
+    assert q.startswith("[K-1] Reviewers accepted. Merge?") and "⏳ Your call: reply within 2 min" in q
+
+
+async def test_a_second_accepted_does_not_ask_for_the_merge_again(ledger):
+    client, d = make(ledger, human_wait_s=120)
+    rid = request_in(ledger, "FORGE", rooms={"forge": "fg"}, winner="claude-coder",
+                     bids=[{"agent": "claude-coder"}, {"agent": "codex-coder"}, {"agent": "opencode-coder"}])
+    await d.handle(ev(1, "ok\nACCEPTED", room="fg", name="codex-coder"))
+    since = ledger.get_request(rid).data["gate_since"]
+    await d.handle(ev(2, "agreed\nACCEPTED", room="fg", name="opencode-coder"))
+    assert sum("Merge?" in t for t in client.texts("fg")) == 1
+    assert ledger.get_request(rid).data["gate_since"] == since  # the clock didn't restart
+
+
+async def test_handing_off_the_storm_result_is_labelled_as_such(ledger):
+    client, d = make(ledger, deliver="branch")
+    request_in(ledger, "STORM", rooms={"storm": "st"}, data={"gate": "storm_result"})
+    await d.handle(ev(1, "🤖", room="st", name="sam"))
+    assert any("Storm (accepting the result): handed to the agent" in t for t in client.texts("st"))
+
+
+def test_the_pull_request_question_has_no_deadline():
+    from kraken.conductor.state import _PR_QUESTION
+    assert "No time limit" in _PR_QUESTION and "within" not in _PR_QUESTION
 
 
 async def test_steps_not_waiting_on_people_are_left_alone(ledger):
@@ -220,7 +295,8 @@ async def test_charter_nudges_only_bidders_who_have_not_bid(ledger):
 async def test_no_nudge_while_a_person_is_needed(ledger):
     client, d = make(ledger, agent_quiet_s=60, human_wait_s=0)
     request_in(ledger, "FORGE", rooms={"forge": "fg"}, winner="c", data={"gate": "merge", "stage_started": 0.0})
-    request_in(ledger, "STORM", rooms={"storm": "st"}, storm_mode="drill", data={"stage_started": 0.0})
+    request_in(ledger, "STORM", rooms={"storm": "st"}, storm_mode="drill",
+               data={"stage_started": 0.0, "defend_since": 0.0})  # the people's turn to defend
     await d.tick(10_000)
     assert not any("quiet here" in t for t in client.texts())  # stage timeouts may still ping
 
