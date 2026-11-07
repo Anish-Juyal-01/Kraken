@@ -99,7 +99,7 @@ def test_storm_fail_loops_then_pings_owner():
         r = apply(r, upd, acts)
         assert r.state == "FORGE" and r.storm_round == i + 1
         assert acts[0].kind == "post" and acts[0].stage == "forge"
-        assert acts[0].text == f"Storm round {i + 1} failed:\nbad"
+        assert acts[0].text.endswith(f"[K-1] Storm round {i + 1} failed:\nbad")
         r = apply(r, *step(r, cfg, Signal(kind="accepted")))
         assert r.state == "STORM"
     upd, acts = step(r, cfg, Signal(kind="failed"))
@@ -151,9 +151,9 @@ def test_spark_approve():
 def test_spark_reject():
     upd, acts = step(gated("SPARK", "brief"), Config(), cmd("reject", "too vague"))
     assert "state" not in upd and "gate" not in upd["data"]
-    assert acts[0].stage == "spark" and acts[0].text == "Revise the brief: too vague"
+    assert acts[0].stage == "spark" and acts[0].text.startswith("@kraken-planner ") and acts[0].text.endswith("Revise the brief: too vague")
     _, acts = step(gated("SPARK", "brief"), Config(), cmd("reject"))
-    assert acts[0].text == "Revise the brief: no reason given"
+    assert acts[0].text.endswith("Revise the brief: no reason given")
 
 
 def test_preflight_clear():
@@ -244,7 +244,7 @@ def test_forge_approve_and_reject():
     assert upd["state"] == "CLOSED" and acts[0].kind == "close"
     upd, acts = step(gated("FORGE", "merge"), Config(), cmd("reject", "nope"))
     assert "state" not in upd and "gate" not in upd["data"]
-    assert acts[0].stage == "forge" and acts[0].text == "Changes requested: nope"
+    assert acts[0].stage == "forge" and acts[0].text.endswith("Changes requested: nope")
 
 
 def test_close_action_shape():
@@ -273,7 +273,7 @@ def test_storm_reject_loops_to_forge():
     r = gated("STORM", "storm_result", storm_round=0)
     upd, acts = step(r, Config(), cmd("reject", "flaky"))
     assert upd["state"] == "FORGE" and upd["storm_round"] == 1 and "gate" not in upd["data"]
-    assert acts[0].stage == "forge" and acts[0].text == "Storm round 1 failed:\nflaky"
+    assert acts[0].stage == "forge" and acts[0].text.endswith("Storm round 1 failed:\nflaky")
 
 
 def test_storm_reject_at_cap_pings():
@@ -365,3 +365,8 @@ def test_charter_prompt_with_nine_bids_has_no_extra_line():
     bids = [{"agent": f"a{i}"} for i in range(1, 10)]
     _, acts = step(req(state="CHARTER", bids=bids), Config(), Signal(kind="bids_done"))
     assert "pick <name>" not in acts[0].text
+
+
+def test_follow_ups_wake_the_agent_by_name():
+    upd, acts = step(gated("FORGE", "merge", winner="codex-coder"), Config(), cmd("reject", "add a 404 test"))
+    assert acts[0].text == "@codex-coder [K-1] Changes requested: add a 404 test"

@@ -29,6 +29,7 @@ from kraken.switch_client import SwitchClient, SwitchError
 log = logging.getLogger(__name__)
 
 _TIMED_STAGES = ("SPARK", "CHARTER", "FORGE", "STORM", "DELIVER")
+_BUILD_LANE = ("FORGE", "STORM", "DELIVER")  # the steps that use the repo and its port
 _MENTION = re.compile(r"^@kraken\b[:,]?\s*", re.IGNORECASE)
 _RESOLVE_HINT = "reply 1️⃣, 2️⃣ or 🙅"
 _QUOTE_MAX = 300
@@ -47,7 +48,10 @@ _NAMED_PROJECT = re.compile(r"^(?:build\s+)?([\w.-]+)\s*:\s+(.+)$", re.IGNORECAS
 # offline notice even starts with "@kraken"), so match the text: live, one became request K-4.
 _SWITCH_NOTICE = re.compile(
     r"^(@\S+\s+)*(I'm currently offline\b.*connector isn't reporting in"
-    r"|Starting a session to handle this\b)", re.IGNORECASE | re.DOTALL)
+    r"|Starting a session to handle this\b"
+    # the gateway's own warnings (posted as "admin"), e.g. "⚠️ @kraken **x** isn't in this
+    # room, so your message won't reach it": never a person taking a step (live, K-12)
+    r"|⚠️|.*\bisn't in this room, so your message won't reach it)", re.IGNORECASE | re.DOTALL)
 
 
 class BidPick(BaseModel):
@@ -191,6 +195,21 @@ class Dispatcher:
                                    "Reply 🤖 any time to give it to the agent.", stage_room(req.state))
         return True
 
+    def _claim_refused(self, req: Request, user: str, name: str) -> str:
+        """What 🙋 / `me` gets when the step can't be claimed. Taking over from a teammate
+        happens here too: an explicit 🙋 moves the step to whoever sent it."""
+        pending = self._pending_wait(req)
+        if pending is None:
+            return (f"[K-{req.id}] Nothing in {name} is waiting on a person right now; "
+                    "Kraken asks here when it needs someone.")
+        claimed = req.data.get("claimed", {})
+        holder = claimed.get(pending[1])
+        if holder == user:
+            return f"[K-{req.id}] {name} is already yours."
+        merge_data(self.ledger, req.id, claimed={**claimed, pending[1]: user})
+        return (f"[K-{req.id}] {user} takes over {name} from {holder}: no time limit. "
+                "Reply 🤖 any time to give it to the agent.")
+
     async def _auto_handoffs(self, now: float) -> None:
         """Human first, but nobody waits forever: after human_wait_s with no reply from a
         person, the agent takes over that one thing, and Kraken says so in the room."""
@@ -288,7 +307,7 @@ class Dispatcher:
             asked = d.get("defend_since") is not None  # the who-defends question went out already
             merge_data(self.ledger, rid, broke_noted=True,
                        **({} if asked else {"defend_since": now}))
-            people = " ".join(f"@{p}" for p in self.cfg.people)
+            people = " ".join(f"@{p}" for p in self.runner.people(req))
             await self.runner.say(
                 req, f"{people} [K-{req.id}] Squall has broken things (above): it's your turn to "
                 f"defend. Fix them on kraken/K-{req.id}, then tell @{self.crew.primary('coach')} "
@@ -300,7 +319,7 @@ class Dispatcher:
             await self._nudge_quiet_agents(now)
             for req in self.ledger.open_requests():
                 started = req.data.get("stage_started")
-                if (req.state not in _TIMED_STAGES or started is None
+                if (req.state not in _TIMED_STAGES or started is None or req.data.get("queued")
                         or req.data.get("timed_out") == req.state
                         or now - started <= self.cfg.timeouts_s.get(req.state.lower(), 1 << 30)):
                     continue
@@ -533,7 +552,7 @@ class Dispatcher:
         if cmd.kind == "reclaim":
             if stage not in handed:
                 if not await self._claim(req, cmd.user):  # 🙋 / me: "I'll handle this"
-                    await self.runner.say(req, f"[K-{req.id}] {name} is already yours.", room)
+                    await self.runner.say(req, self._claim_refused(req, cmd.user, name), room)
                 return
             handed.remove(stage)
             merge_data(self.ledger, req.id, handoff=handed)
@@ -584,6 +603,46 @@ class Dispatcher:
             await self.runner.say(other, f"[K-{other.id}] closed: settled in [K-{req.id}]",
                                   "sonar-resolution")
 
+    # ---- one build at a time per repo ------------------------------------
+    # Each agent keeps one checkout of a project and Storm runs the app on the project's
+    # port, so two requests building the same repo at once would collide. A request that
+    # reaches Forge while another one is building or testing that repo waits its turn.
+    def _project_of(self, req: Request) -> str | None:
+        return req.data.get("project") or self.projects.default_name()
+
+    def _lane_holder(self, req: Request) -> Request | None:
+        mine = self._project_of(req)
+        return next((o for o in self.ledger.open_requests()
+                     if o.id != req.id and o.state in _BUILD_LANE and not o.data.get("queued")
+                     and self._project_of(o) == mine), None)
+
+    async def _queue_if_busy(self, req: Request, actions: list[Action]) -> list[Action]:
+        opens_forge = [a for a in actions if a.kind == "open_stage" and a.stage == "forge"]
+        if not opens_forge or "forge" in req.rooms:
+            return actions
+        holder = self._lane_holder(req)
+        if holder is None:
+            return actions
+        merge_data(self.ledger, req.id, queued=True)
+        await self.runner.say(
+            req, f"[K-{req.id}] waiting for its turn: [K-{holder.id}] is still building or testing "
+            f"{self._project_of(req)}, and two builds of one repo would collide. Forge starts "
+            "here as soon as it finishes.")
+        return [a for a in actions if a not in opens_forge]
+
+    async def _release_lane(self, done: Request) -> None:
+        """The repo is free again: start Forge for the request that has waited longest."""
+        mine = self._project_of(done)
+        nxt = next((o for o in self.ledger.open_requests()  # oldest first
+                    if o.data.get("queued") and o.state == "FORGE" and self._project_of(o) == mine), None)
+        if nxt is None or self._lane_holder(nxt) is not None:
+            return
+        merge_data(self.ledger, nxt.id, queued=None, stage_started=time.time(), timed_out=None)
+        nxt = self.ledger.get_request(nxt.id)
+        await self.runner.say(nxt, f"[K-{nxt.id}] its turn: [K-{done.id}] is done with {mine}. "
+                                   "Starting Forge.")
+        await self.runner.run(nxt, [Action(kind="open_stage", stage="forge")])
+
     # ---- the conductor loop -------------------------------------------
     async def apply(self, rid: int, inp: Signal | Command) -> None:
         """step() the request, persist the updates, run the actions, chain pre-flight."""
@@ -598,7 +657,10 @@ class Dispatcher:
         if new.data.get("gate") and new.data.get("gate") != req.data.get("gate"):
             merge_data(self.ledger, rid, gate_since=time.time())  # the human wait starts now
             new = self.ledger.get_request(rid)
+        actions = await self._queue_if_busy(new, actions)
         await self.runner.run(new, actions)
+        if req.state in _BUILD_LANE and new.state not in _BUILD_LANE:
+            await self._release_lane(new)
         if new.state == "PREFLIGHT" and req.state != "PREFLIGHT":
             await self._preflight(new)
         if new.state == "STORM" and req.state != "STORM":
@@ -612,7 +674,7 @@ class Dispatcher:
         merge_data(self.ledger, req.id, defend_since=time.time(), defend_handed=None,
                    broke_noted=None, claimed={k: v for k, v in req.data.get("claimed", {}).items()
                                               if k != "defend"})
-        people = " ".join(f"@{p}" for p in self.cfg.people)
+        people = " ".join(f"@{p}" for p in self.runner.people(req))
         await self.runner.say(
             req, f"{people} [K-{req.id}] Storm is starting: Squall attacks the build next. "
             f"You defend (fix what breaks), or @{self.crew.primary('defender')} does. "

@@ -128,7 +128,7 @@ Then follow the rooms Kraken opens. Each question says what you can reply.
 ### Check it works
 
 ```bash
-pytest                             # 460 offline tests (fake Switch, fake LLM), no keys needed
+pytest                             # 469 offline tests (fake Switch, fake LLM), no keys needed
 python scripts/smoke.py            # optional live end-to-end check (see below)
 ```
 
@@ -161,6 +161,13 @@ Every step belongs to a person until they say otherwise. When a step needs someo
 | **Pull request** | You approve it. | Never: the pull request always waits for a person. |
 
 A handoff covers one step of one request; the next request starts human-first again. Set `human_wait_s: 0` in `kraken.yaml` to always wait for people, or set a step's `autonomy` key to `auto` to always give it to agents.
+
+## Working as a team
+
+- **Anyone can ask.** Any person in `#kraken-requests` can start a request. Each request gets its own rooms and tag (`K-12`), and whoever asked is added to those rooms and mentioned, along with everyone in `people:`.
+- **Anyone can answer.** Any person in a stage room can approve, reject, pick or take a step. If two people answer at once, the first answer counts.
+- **Take over from a teammate.** If someone else is handling a step, reply 🙋 or `me` and it moves to you; Kraken says so in the room.
+- **One build per repo at a time.** Each agent keeps one checkout of a repo, and Storm runs the app on that repo's port. So when two requests reach Forge on the same repo, the second waits ("waiting for its turn: K-11 is still building or testing your-repo") and starts as soon as the first is done. Requests on different repos run side by side.
 
 ## Kraken's own model
 
@@ -238,7 +245,7 @@ Environment variables: `SWITCH_URL`, `SWITCH_AGENT_ID`, `SWITCH_API_KEY` (requir
 
 ## What's verified
 
-- **Offline:** 460 tests pass (`pytest`), with fake Switch and fake LLM servers: the state machine, human-first waits and handoffs, auto-join, the command parser, Sonar, Storm faults, repo detection and the Switch client.
+- **Offline:** 469 tests pass (`pytest`), with fake Switch and fake LLM servers: the state machine, human-first waits and handoffs, auto-join, the command parser, Sonar, Storm faults, repo detection and the Switch client.
 - **Live on Discord through Switch:**
   - the full pipeline on the bundled shopfront app;
   - `@kraken connect` and a full build on [fastapi-todo](https://github.com/renceInbox/fastapi-todo) (request K-5), where Storm found and fixed the 64-bit ID crash;

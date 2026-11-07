@@ -85,6 +85,11 @@ class ActionRunner:
                                     self.cfg.charter.max_bidders, rotation)
         return live, missing
 
+    def people(self, req: Request) -> list[str]:
+        """Who belongs in this request's rooms: the team (`people`) plus whoever asked."""
+        agents = self.crew.all_names() | {self.cfg.kraken_agent}
+        return [p for p in dict.fromkeys([*self.cfg.people, req.owner]) if p and p not in agents]
+
     async def say(self, req: Request, text: str, stage: str | None = None) -> None:
         """Post to the stage room (when bound) or else the origin room."""
         room = (req.rooms.get(stage) if stage else None) or req.origin_room
@@ -152,7 +157,15 @@ class ActionRunner:
         await self._connect_parent(req)
         project = self.projects.get(req.data.get("project"))
         inputs = stage_inputs(stage, req, self.cfg, self.crew, project=project, **extra)
-        room_id = await open_stage(self.client, stage, inputs, self.cfg.people, self.cfg.bridge)
+        people = self.people(req)
+        try:  # a request can come from an agent account too: rooms list people only
+            listed = await self.client.op("list_agents")
+            switch_agents = {a.get("name") for a in listed if isinstance(a, dict)} \
+                if isinstance(listed, list) else set()
+            people = [p for p in people if p not in switch_agents]
+        except SwitchError as err:
+            log.warning("could not list agents to filter room people: %s", err)
+        room_id = await open_stage(self.client, stage, inputs, people, self.cfg.bridge)
         self.ledger.bind_room(req.id, stage, room_id)
         merge_data(self.ledger, req.id, stage_started=time.time(), timed_out=None)
         invited: list[str] = []

@@ -76,6 +76,11 @@ def _sig(inp: Signal | Command) -> dict:
     return inp.data if isinstance(inp, Signal) else {}
 
 
+def _at(agent: str | None) -> str:
+    """Agents wake on an @-mention, so a follow-up meant for one must name it."""
+    return f"@{agent} " if agent else ""
+
+
 def _yours(cfg: Config, text: str) -> str:
     """A human gate's question, saying the person decides first and for how long."""
     if cfg.human_wait_s <= 0:
@@ -103,7 +108,7 @@ def _brief_approved(req, cfg, inp):
 
 def _brief_rejected(req, cfg, inp):
     reason = _arg(inp) or _NO_REASON
-    return {"data": _data(req)}, [_post(f"Revise the brief: {reason}", "spark")]
+    return {"data": _data(req)}, [_post(f"@{cfg.agents.planner} [K-{req.id}] Revise the brief: {reason}", "spark")]
 
 
 # PREFLIGHT
@@ -179,7 +184,7 @@ def _merge_approved(req, cfg, inp):
 
 def _merge_rejected(req, cfg, inp):
     reason = _arg(inp) or _NO_REASON
-    return {"data": _data(req)}, [_post(f"Changes requested: {reason}", "forge")]
+    return {"data": _data(req)}, [_post(f"{_at(req.winner)}[K-{req.id}] Changes requested: {reason}", "forge")]
 
 
 # STORM
@@ -256,7 +261,7 @@ def _storm_failed(req, cfg, inp):
     findings = _sig(inp).get("findings", "") if isinstance(inp, Signal) else _arg(inp)
     if n < cfg.storm.max_rounds:
         return ({"storm_round": n, "state": "FORGE", "data": _data(req)},
-                [_post(f"Storm round {n} failed:\n{findings}", "forge")])
+                [_post(f"{_at(req.winner)}[K-{req.id}] Storm round {n} failed:\n{findings}", "forge")])
     return ({"storm_round": n, "data": _data(req)},
             [_ping(req, f"storm failed {n} times")])
 

@@ -189,7 +189,7 @@ async def test_drill_storm_waits_for_squall_then_gives_people_their_turn(ledger)
     req = ledger.get_request(rid)
     since = req.data["defend_since"]
     note = client.texts("st")[-1]
-    assert note.startswith("@anish_2007 [K-1] Squall has broken things") and "No answer in 2 min" in note
+    assert note.startswith("@anish_2007 @sam [K-1] Squall has broken things") and "No answer in 2 min" in note
     await d.tick(since + 119)
     assert ledger.get_request(rid).storm_mode == "drill"
     await d.tick(since + 121)
@@ -347,12 +347,12 @@ async def test_storm_asks_who_defends_as_soon_as_it_opens(ledger):
     st = req.rooms["storm"]
     ask = client.texts(st)[-1]
     assert req.state == "STORM" and req.data["defend_since"] is not None
-    assert ask.startswith("@anish_2007 [K-1] Storm is starting") and "No answer in 2 min" in ask
+    assert ask.startswith("@anish_2007 @sam [K-1] Storm is starting") and "No answer in 2 min" in ask
     await d.handle(ev(2, "🙋", room=st, name="anish_2007"))  # a person defends: no time limit
     assert ledger.get_request(rid).data["claimed"] == {"defend": "anish_2007"}
     await d.handle(ev(3, "/v2/ping 500s on bad input. @storm-defender @storm-coach", room=st, name="squall"))
     note = client.texts(st)[-1]
-    assert note.startswith("@anish_2007 [K-1] Squall has broken things") and "No answer" not in note
+    assert note.startswith("@anish_2007 @sam [K-1] Squall has broken things") and "No answer" not in note
     await d.tick(10**9)
     assert ledger.get_request(rid).storm_mode == "drill"  # still the person's
 
