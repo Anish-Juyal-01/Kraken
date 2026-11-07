@@ -149,7 +149,7 @@ Every step is a person's by default. Hand one to an agent when you don't want to
 | **Storm** | Drill: Squall breaks things, you fix them, the coach scores you | `storm-defender`: it switches the round to auto and patches the faults |
 | **Pull request** | You approve it | Nobody: nothing leaves the chat without a person |
 
-Nobody waits forever: if no person replies to a step for `human_wait_s` (default 120 seconds), Kraken hands it to the agent itself and says so in the room. Any message from a person in the step's room restarts the clock; `human_wait_s: 0` always waits. The pull request is never handed off.
+You only have to say who handles each step, not finish it in a hurry. When a step needs a person, Kraken asks *"Who's handling this?"*: reply 🙋 (or `me`, or just start answering in the room) and it's yours with no time limit; reply 🤖 and the agent does it. If nobody answers within `human_wait_s` (default 120 seconds), the agent takes it and Kraken says so in the room. You can still reply 🤖 later on a step you took. `human_wait_s: 0` always waits for people. The pull request is never handed off.
 
 Every handoff is announced in the room and recorded on the request (`handoff`, `handoff_by`). To hand a step to agents for every request, set its `autonomy` key to `auto`, or `storm.default_mode: auto`.
 
@@ -176,7 +176,8 @@ The crew is Kraken's roster of agents: the Charter bidders and the single-seat r
 
 - `crew` prints one line per role. Each agent shows its vendor and whether it is online (`●`) or offline (`○`), e.g. `bidder: claude-coder (claude-code) ● · kimi-coder (opencode · moonshot/kimi-k2) ○`. Vendor and liveness come from Switch (`known_agent_type`, the agent's first listed model, and its sessions).
 - `enlist <name>` checks that Switch has an agent with that exact name. An agent holds one role, so enlisting it under a new role moves it. Roles: `bidder`, `planner`, `attacker`, `defender`, `coach`.
-- `retire <name>` takes the agent off the crew.
+- **New agents join on their own.** At every Charter, Kraken asks Switch for its agents; any coding agent (Claude Code, Codex, OpenCode, Antigravity, Cursor, …) not yet on the crew becomes a bidder and Kraken announces it. Add agents in Switch Console and they bid in the next round: no Kraken change and no command. Custom agents without a coding type never auto-join. Turn it off with `charter.auto_join: false`, or keep names out with `charter.never_join`.
+- `retire <name>` takes the agent off the crew, and auto-join leaves it off until someone enlists it again.
 - The commands work only in the requests room (`rooms.requests`), and messages from crew agents are ignored, so agents cannot reshape the crew.
 - For the single-seat roles Kraken uses the first member listed.
 - `kraken.yaml`'s `bidders` and `agents` are only the initial seed: Kraken copies them into the database once, on first start. Editing them afterwards changes nothing; use the commands, or delete `kraken.db` (which also clears claims and requests) to reseed.

@@ -34,6 +34,12 @@ _RESOLVE_HINT = "reply 1️⃣, 2️⃣ or 🙅"
 _QUOTE_MAX = 300
 _CREW_KINDS = ("crew", "enlist", "retire")
 _PROJECT_KINDS = ("connect", "projects", "use", "project_set")
+# Switch's reply when an agent's addressing policy doesn't let Kraken mention it (agents made
+# by hand default to owner-only). Such an agent can't bid: drop it from the round, say why.
+_REFUSES_MENTIONS = re.compile(r"not permitted to direct messages to me|restricted who can address me",
+                               re.IGNORECASE)
+# Switch's note when an agent's turn crashed (e.g. its model's quota is 0): it won't bid.
+_TURN_FAILED = re.compile(r"finished without replying\.?\s*The turn failed:?\s*(.*)", re.IGNORECASE | re.DOTALL)
 _STAGE_NAMES = {"SPARK": "Spark (answers and brief)", "CHARTER": "Charter (picking the plan)",
                 "FORGE": "Forge (merge OK)", "STORM": "Storm (defending)"}
 _NAMED_PROJECT = re.compile(r"^(?:build\s+)?([\w.-]+)\s*:\s+(.+)$", re.IGNORECASE | re.DOTALL)
@@ -139,30 +145,51 @@ class Dispatcher:
                 log.exception("reaction receipt for K-%s failed", tag)
             return await self._command(cmd, None)
 
-    def _human_wait(self, req: Request) -> tuple[str, float] | None:
-        """(what, since) while a person has been asked for something and hasn't answered.
+    def _pending_wait(self, req: Request) -> tuple[str, str, float] | None:
+        """(what, key, since) while a person has been asked for something that isn't done.
         The clock starts when the person is asked, never when the stage merely opens."""
         if req.state not in _STAGE_NAMES or req.state in req.data.get("handoff", []):
             return None
         d, gate = req.data, req.data.get("gate")
         if gate and gate == STAGE_GATE.get(req.state):  # approve the brief, pick, merge OK, accept
-            return "gate", d.get("gate_since") or d.get("stage_started") or 0.0
+            return "gate", f"gate:{gate}", d.get("gate_since") or d.get("stage_started") or 0.0
         if (req.state == "SPARK" and gate is None and d.get("asked_at") is not None
                 and not d.get("answers_handed")):
-            return "answers", d["asked_at"]  # the planner asked the owner something
+            return "answers", "answers", d["asked_at"]  # the planner asked the owner something
         if (req.state == "STORM" and req.storm_mode == "drill" and gate is None
                 and d.get("defend_since") is not None and not d.get("defend_handed")):
-            return "defend", d["defend_since"]  # Squall broke things: the people's turn to fix
+            return "defend", "defend", d["defend_since"]  # Squall broke things: people defend
         return None
 
+    def _human_wait(self, req: Request) -> tuple[str, float] | None:
+        """(what, since) while Kraken waits for a person to say who handles the step. Once a
+        person claims it (🙋 / me, or by answering), there is no time limit."""
+        pending = self._pending_wait(req)
+        if pending is None or pending[1] in req.data.get("claimed", {}):
+            return None
+        return pending[0], pending[2]
+
     def _waiting_on_people(self, req: Request) -> bool:
-        return self._human_wait(req) is not None
+        return self._pending_wait(req) is not None  # asked, or claimed and being done by a person
 
     def _wait_note(self, what: str) -> str:
-        mins = max(1, round(self.cfg.human_wait_s / 60))
         if self.cfg.human_wait_s <= 0:
             return f"⏳ Your call: {what}."
-        return f"⏳ Your call: {what}. Reply within {mins} min, or the agent takes over (🤖 hands it over now)."
+        mins = max(1, round(self.cfg.human_wait_s / 60))
+        return (f"⏳ Who's handling this ({what})? Reply 🙋 or `me` to do it yourself (no time "
+                f"limit), or 🤖 to give it to the agent. No answer in {mins} min: the agent takes it.")
+
+    async def _claim(self, req: Request, user: str) -> bool:
+        """A person takes the pending step: no timer from now on. False if nothing to claim."""
+        pending = self._pending_wait(req)
+        if pending is None or pending[1] in req.data.get("claimed", {}):
+            return False
+        merge_data(self.ledger, req.id, claimed={**req.data.get("claimed", {}), pending[1]: user})
+        what = {"answers": "answering the planner", "defend": "defending"}.get(
+            pending[0], _STAGE_NAMES.get(req.state, req.state.title()))
+        await self.runner.say(req, f"[K-{req.id}] {user} is handling {what}: no time limit. "
+                                   "Reply 🤖 any time to give it to the agent.", stage_room(req.state))
+        return True
 
     async def _auto_handoffs(self, now: float) -> None:
         """Human first, but nobody waits forever: after human_wait_s with no reply from a
@@ -175,8 +202,7 @@ class Dispatcher:
             hw = self._human_wait(req)
             if hw is None:
                 continue
-            what, since = hw
-            since = max(since, req.data.get("human_at") or 0.0)  # a person's reply restarts it
+            what, since = hw  # nobody has said who handles it yet (a claim stops the clock)
             if now - since <= wait:
                 continue
             try:
@@ -322,6 +348,10 @@ class Dispatcher:
             else:
                 await self._note_asks(rid, ev.room_id, name, body)
         cmd = None if known_agent else parse(body, user=name)
+        if not known_agent and cmd is None and rid is not None:
+            # a person talking in the step's room (answering the planner, starting to defend,
+            # "looking at it") is handling it: stop the clock
+            await self._claim(self.ledger.get_request(rid), name)
         if cmd is not None and cmd.kind in (*_CREW_KINDS, *_PROJECT_KINDS):
             if ev.room_id != self.room_ids.get(self.cfg.rooms.requests):
                 cmd = None  # crew and project commands only work in the requests room
@@ -500,7 +530,8 @@ class Dispatcher:
         handed = list(req.data.get("handoff", []))
         if cmd.kind == "reclaim":
             if stage not in handed:
-                await self.runner.say(req, f"[K-{req.id}] {name} is already yours.", room)
+                if not await self._claim(req, cmd.user):  # 🙋 / me: "I'll handle this"
+                    await self.runner.say(req, f"[K-{req.id}] {name} is already yours.", room)
                 return
             handed.remove(stage)
             merge_data(self.ledger, req.id, handoff=handed)
@@ -598,6 +629,25 @@ class Dispatcher:
         stage = next((s for s, r in req.rooms.items() if r == ev.room_id), None)
         lines = [ln.strip() for ln in body.splitlines()]
         live = req.data.get("live_bidders") or [b["agent"] for b in req.bids]
+        failed = _TURN_FAILED.search(body)
+        if (stage == "charter" and req.state == "CHARTER" and sender in live
+                and not any(b["agent"] == sender for b in req.bids)
+                and (_REFUSES_MENTIONS.search(body) or failed)):
+            live = [a for a in live if a != sender]
+            merge_data(self.ledger, rid, live_bidders=live)
+            if failed:
+                why = failed.group(1).strip().splitlines()[0][:220] if failed.group(1).strip() else "unknown error"
+                text = (f"[K-{req.id}] {sender} can't bid this round: its turn failed ({why}). "
+                        "Check its model and account in Switch Console; it's asked again next request.")
+            else:
+                text = (f"[K-{req.id}] {sender} can't bid: its addressing setting stops Kraken from "
+                        f"mentioning it. In Switch Console set {sender}'s addressing to Anyone; it "
+                        "bids from the next request.")
+            await self.runner.say(req, text, "charter")
+            req = self.ledger.get_request(rid)
+            if req.bids and len(req.bids) >= len(live):
+                await self.apply(rid, Signal(kind="bids_done", data=await self._bids_done_data(req)))
+            return True
         if stage == "spark" and sender == self.crew.primary("planner") and "BRIEF READY" in lines:
             await self._brief_ready(req)
         elif (stage == "charter" and req.state == "CHARTER" and sender in live

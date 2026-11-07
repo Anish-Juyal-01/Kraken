@@ -81,7 +81,8 @@ def _yours(cfg: Config, text: str) -> str:
     if cfg.human_wait_s <= 0:
         return f"{text} ⏳ Your call."
     mins = max(1, round(cfg.human_wait_s / 60))
-    return f"{text} ⏳ Your call: reply within {mins} min, or the agent takes over (🤖 hands it over now)."
+    return (f"{text} ⏳ Who's handling this? Reply 🙋 or `me` to do it yourself (no time limit), "
+            f"or 🤖 to give it to the agent. No answer in {mins} min: the agent takes it.")
 
 
 def _ask(req: Request, gate: str, text: str, accepts: list[str], extra: dict | None = None) -> Result:

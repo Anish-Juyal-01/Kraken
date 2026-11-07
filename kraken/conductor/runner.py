@@ -46,6 +46,26 @@ class ActionRunner:
         self.crew = Crew(ledger)
         self.projects = Projects(ledger)
 
+    async def auto_join(self) -> list[str]:
+        """Agents added in Switch join the crew on their own: any coding agent (Claude Code,
+        Codex, OpenCode, Antigravity, Cursor, ...) that isn't on the crew yet becomes a
+        bidder. No Kraken change or chat command per agent. Returns the newcomers."""
+        if not self.cfg.charter.auto_join:
+            return []
+        try:
+            agents = await self.client.op("list_agents")
+        except SwitchError as err:
+            log.warning("auto-join: could not list agents: %s", err)
+            return []
+        known = self.crew.all_names() | self.crew.retired() | {self.cfg.kraken_agent}
+        joined = []
+        for a in agents if isinstance(agents, list) else []:
+            name, kind = a.get("name"), (a.get("known_agent_type") or "").lower()
+            if name and kind and name not in known and name not in self.cfg.charter.never_join:
+                self.crew.enlist(name, "bidder")
+                joined.append(name)
+        return joined
+
     async def live_bidders(self) -> tuple[list[str], list[str]]:
         """(live, missing) from the crew's bidders. An agent is live when Switch reports
         a session for it in state live/open. When more are live than charter.max_bidders
@@ -108,6 +128,11 @@ class ActionRunner:
         extra = dict(extra)
         invitees: list[str] = []
         if stage == "charter":
+            joined = await self.auto_join()
+            if joined:
+                await self.client.send(
+                    req.origin_room, f"[K-{req.id}] new on the crew (found in Switch): "
+                    f"{', '.join(joined)} — they bid from now on. `@kraken retire <name>` removes one.")
             live, missing = await self.live_bidders()
             if missing:
                 await self.client.send(

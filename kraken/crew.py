@@ -11,6 +11,7 @@ ROLES: tuple[Role, ...] = get_args(Role)
 
 _META_KEY = "crew"
 _ROTATION_KEY = "crew_rotation"
+_RETIRED_KEY = "crew_retired"  # retired by a person: auto-join must not bring them back
 # An agent counts as online when get_agent_detail reports a session in one of these
 # states (list_agents has no liveness field).
 _LIVE_STATES = ("live", "open")
@@ -74,6 +75,7 @@ class Crew:
                 names.remove(name)
         roster[role].append(name)
         self._save(roster)
+        self._set_retired(self.retired() - {name})
         return True
 
     def retire(self, name: str) -> bool:
@@ -82,8 +84,16 @@ class Crew:
             if name in names:
                 names.remove(name)
                 self._save(roster)
+                self._set_retired(self.retired() | {name})
                 return True
         return False
+
+    def retired(self) -> set[str]:
+        raw = self.ledger.get_meta(_RETIRED_KEY)
+        return set(json.loads(raw)) if raw else set()
+
+    def _set_retired(self, names: set[str]) -> None:
+        self.ledger.set_meta(_RETIRED_KEY, json.dumps(sorted(names)))
 
     def next_rotation(self) -> int:
         """The bidder-rotation counter; each call returns the current value and advances it."""

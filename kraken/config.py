@@ -33,6 +33,11 @@ class AgentsConfig(BaseModel):
 
 class CharterConfig(BaseModel):
     max_bidders: int = Field(default=5, ge=1)
+    # Coding agents added in Switch join as bidders on their own at the next Charter
+    # (any vendor: Switch reports each agent's type). Custom agents without a coding type
+    # never auto-join. `@kraken retire <name>` takes one off; never_join keeps it off.
+    auto_join: bool = True
+    never_join: list[str] = Field(default_factory=list)
 
 
 class ProjectConfig(BaseModel):

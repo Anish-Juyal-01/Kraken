@@ -139,29 +139,33 @@ async def test_a_slow_planner_never_hands_spark_off_before_anyone_is_asked(ledge
     assert "handoff" not in req.data and not req.data.get("answers_handed")
 
 
-async def test_planner_question_asks_the_owner_first_then_the_planner_decides(ledger):
-    import time as _t
+async def test_planner_question_with_no_answer_goes_to_the_planner_after_2_min(ledger):
     client, d = make(ledger, human_wait_s=120)
     rid = request_in(ledger, "SPARK", rooms={"spark": "sp"}, data={"stage_started": 0.0})
     await d.handle(ev(1, "Should /v2/ping also report the version?", room="sp", name="kraken-planner"))
-    req = ledger.get_request(rid)
-    asked = req.data["asked_at"]
+    asked = ledger.get_request(rid).data["asked_at"]
     note = client.texts("sp")[-1]
     assert note.startswith("@sam [K-1] the planner is asking you something")
-    assert "reply within 2 min, or the agent takes over" in note.replace("Reply", "reply")
-    await d.handle(ev(2, "no, just pong", room="sp", name="sam"))  # the owner answers in time
-    human_at = ledger.get_request(rid).data["human_at"]
-    await d.tick(human_at + 100)
+    assert "Who's handling this" in note and "No answer in 2 min: the agent takes it" in note
+    await d.tick(asked + 119)
     assert not ledger.get_request(rid).data.get("answers_handed")
-    # a second question restarts the person's turn; silence then hands it to the planner
-    await d.handle(ev(3, "And should it skip the rate limit?", room="sp", name="kraken-planner"))
-    second = ledger.get_request(rid).data["asked_at"]
-    assert second > asked
-    await d.tick(second + 121)
+    await d.tick(asked + 121)
     req = ledger.get_request(rid)
     assert req.data["answers_handed"] and "SPARK answers" in req.data["handoff_by"]
     assert "decide the open answers yourself" in client.texts("sp")[-1]
     assert "handoff" not in req.data  # the brief is NOT handed off: a person still approves it
+
+
+async def test_answering_the_planner_claims_it_with_no_time_limit(ledger):
+    client, d = make(ledger, human_wait_s=120)
+    rid = request_in(ledger, "SPARK", rooms={"spark": "sp"}, data={"stage_started": 0.0})
+    await d.handle(ev(1, "Should /v2/ping also report the version?", room="sp", name="kraken-planner"))
+    await d.handle(ev(2, "no, just pong", room="sp", name="sam"))
+    req = ledger.get_request(rid)
+    assert req.data["claimed"] == {"answers": "sam"}
+    assert "sam is handling answering the planner: no time limit" in client.texts("sp")[-1]
+    await d.tick(req.data["asked_at"] + 100_000)  # however long it takes
+    assert not ledger.get_request(rid).data.get("answers_handed")
 
 
 async def test_after_spark_answers_are_handed_off_the_brief_still_waits_for_a_person(ledger):
@@ -185,7 +189,7 @@ async def test_drill_storm_waits_for_squall_then_gives_people_their_turn(ledger)
     req = ledger.get_request(rid)
     since = req.data["defend_since"]
     note = client.texts("st")[-1]
-    assert note.startswith("@anish_2007 [K-1] Squall has broken things") and "within 2 min" in note
+    assert note.startswith("@anish_2007 [K-1] Squall has broken things") and "No answer in 2 min" in note
     await d.tick(since + 119)
     assert ledger.get_request(rid).storm_mode == "drill"
     await d.tick(since + 121)
@@ -201,7 +205,33 @@ async def test_gate_questions_say_the_person_decides_first(ledger):
                      bids=[{"agent": "claude-coder"}, {"agent": "codex-coder"}])
     await d.handle(ev(1, "ok\nACCEPTED", room="fg", name="codex-coder"))
     q = client.texts("fg")[-1]
-    assert q.startswith("[K-1] Reviewers accepted. Merge?") and "⏳ Your call: reply within 2 min" in q
+    assert q.startswith("[K-1] Reviewers accepted. Merge? ⏳ Who's handling this?")
+    assert "🙋 or `me` to do it yourself (no time limit)" in q and "No answer in 2 min" in q
+
+
+async def test_claiming_a_gate_stops_the_clock_and_agent_can_still_take_it(ledger):
+    client, d = make(ledger, human_wait_s=120)
+    rid = request_in(ledger, "FORGE", rooms={"forge": "fg"}, winner="claude-coder",
+                     data={"gate": "merge", "gate_since": 1000.0})
+    await d.handle(ev(1, "🙋", room="fg", name="sam"))
+    req = ledger.get_request(rid)
+    assert req.data["claimed"] == {"gate:merge": "sam"}
+    assert "sam is handling Forge (merge OK): no time limit" in client.texts("fg")[-1]
+    await d.tick(1000 + 100_000)
+    assert ledger.get_request(rid).state == "FORGE"  # still sam's, no takeover
+    await d.handle(ev(2, "🙋", room="fg", name="sam"))
+    assert "already yours" in client.texts("fg")[-1]
+    await d.handle(ev(3, "🤖", room="fg", name="sam"))  # changed their mind
+    assert ledger.get_request(rid).state == "STORM"
+
+
+async def test_deciding_straight_away_needs_no_claim_message(ledger):
+    client, d = make(ledger, human_wait_s=120, deliver="branch")
+    rid = request_in(ledger, "FORGE", rooms={"forge": "fg"}, winner="claude-coder",
+                     data={"gate": "merge", "gate_since": 1000.0})
+    await d.handle(ev(1, "approve", room="fg", name="sam"))
+    assert ledger.get_request(rid).state == "STORM"
+    assert not any("is handling" in t for t in client.texts())
 
 
 async def test_a_second_accepted_does_not_ask_for_the_merge_again(ledger):
