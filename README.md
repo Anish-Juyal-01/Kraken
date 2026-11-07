@@ -1,244 +1,236 @@
-# Kraken
+# 🐙 Kraken
 
-**Release the Kraken on your codebase.**
+**Your team decides in chat. Kraken turns the decision into a tested pull request.**
 
-Kraken is an AI crew that lives in your team chat through [Switch](https://docs.switchagents.ai). It listens to every channel it joins, catches decisions that contradict each other (`#backend` says `user_id` is a UUID string, `#mobile` parses it as an int) or drift from the code (`#product` says 100 requests a day, `limits.yaml` says 1000), and opens a room where the two sides settle it. The settled decision becomes a brief, and Kraken runs it through bidding, build and a chaos test, leaving a decision ledger behind.
+Kraken is a crew of AI agents that lives in your team chat (Discord, through [Switch](https://docs.switchagents.ai)). You ask for a feature in a channel. Agents bid for the job, one builds it, the others review it, chaos agents attack it, and a person approves the pull request. People get the first word at every step; if nobody answers in 2 minutes, an agent takes over so work never stalls.
 
-Built for the Flip the Switch hackathon (WeMakeDevs, Nov 4-7 2026), Track 01: Best Business Workflow.
+Built for the **Flip the Switch hackathon** (WeMakeDevs, Nov 4–7 2026), **Track 01: Best Business Workflow**.
 
-**Works on your codebase, not just the demo.** Point Kraken at any repo from chat and the crew works on it, ending in a pull request a person approves:
+- 🎬 **Demo video:** _add the link here_
+- 📦 **Repo:** <https://github.com/Anish-Juyal-01/Kraken>
+
+---
+
+## What it looks like
 
 ```
-@kraken connect https://github.com/your-team/your-api
-@kraken build your-api: add rate limiting to POST /login
-   … brief → bids → build + review → chaos test …
-[K-7] Storm survived. Open a pull request?   👍
-[K-7] pull request: https://github.com/your-team/your-api/pull/42
+#kraken-requests
+  you     @kraken connect https://github.com/your-team/your-api
+  kraken  Connected. your-api · python · tests: pytest · runs on :8000
+  you     @kraken build your-api: add a JSON endpoint GET /api/todos/{id}
+
+#spark-k-5     the planner writes a brief            → "Who's handling this? 🙋 you / 🤖 the agent"
+#charter-k-5   Claude, Gemini, Codex… agents bid     → "Pick one: 1️⃣ 2️⃣ 3️⃣ 4️⃣"
+#forge-k-5     the winner builds, the others review  → "Reviewers accepted. Merge?"
+#storm-k-5     chaos agents attack the running app   → "Who defends? 🙋 you / 🤖 the defender"
+               Storm survived. Open a pull request?  → 👍 (always a person)
 ```
+
+In a real run on a repo Kraken had never seen ([fastapi-todo](https://github.com/renceInbox/fastapi-todo)), Storm found a bug that the build and both reviewers missed: `GET /api/todos/9223372036854775808` crashed with a 500. The defender agent fixed it (now a 404) and added regression tests.
 
 ## The pipeline
 
 ```
-#kraken-requests ─► SPARK ─► SONAR pre-flight ─► CHARTER ─► FORGE ─► STORM ─► DELIVER ─► close
-                     intake     conflict check     bidding    build    chaos test  pull request
-                                     ▲                                       │      (human 👍)
-                     SONAR (always listening across all rooms)      HALLMARK (decision ledger)
+#kraken-requests ─► SPARK ─► SONAR pre-flight ─► CHARTER ─► FORGE ─► STORM ─► DELIVER
+                    brief    conflict check      bidding    build    chaos    pull request
+                                                            + review  test    (a person 👍)
+          SONAR listens to every room          HALLMARK records every decision
 ```
 
-| Stage | What it does |
-|---|---|
-| **Sonar** | Always-on watcher. Extracts decision claims from chat, detects contradictions (chat vs chat, chat vs code) and pre-flight checks briefs. |
-| **Spark** | Intake. A planner agent asks clarifying questions and writes a brief with acceptance criteria. |
-| **Charter** | Bidding room. Several coding agents bid, one is picked, the losers become reviewers. |
-| **Forge** | Build room. The winner implements; reviewers push back until they post `ACCEPTED`. |
-| **Storm** | Chaos test of that change. **Auto** (attacker and defender agents), **Drill** (humans defend) or **Skip**. |
-| **Deliver** | A person approves, then the coder pushes the branch and opens a pull request with the brief, the reviews and the Storm scorecard. |
-| **Hallmark** | Decision ledger (SQLite), mirrored into a Switch room document. |
-
-Two entry points: a person asks for work in `#kraken-requests`, or Sonar finds a conflict on its own, opens a resolution room, and the answer goes straight to Charter.
-
-## Why Switch is central
-
-Kraken cannot exist without Switch.
-
-- **Rooms across apps.** Humans and agents share one room per stage.
-- **`scope=all` event stream.** Sonar hears every room it belongs to over one connection.
-- **Templates and `run_template`.** Each stage is a room template; Kraken creates rooms on demand.
-- **Runs.** Every room made for one request is recorded in one Switch run, so there is a full lineage trail.
-- **Room documents.** Hallmark is mirrored as a room document; briefs live as documents in their stage rooms.
-- **Bring-any-agent.** Charter's bidders are different vendors' agents in the same room.
-
-Transitions between stages live in code (a deterministic state machine), not in LLM instructions. Agents signal outcomes with fixed markers on their own line (`BID:`, `ACCEPTED`, `SURVIVED`, `FAILED`) and Kraken parses only those.
-
-## Setup
-
-Requirements: Python 3.12 or newer, Switch Console (with Docker for the local Switch server), a Discord server you control, an Anthropic API key. Follow the steps in order.
-
-1. **Install Switch Console and connect Discord.** Follow the install guide, <https://docs.switchagents.ai/switch-rooms/getting-started> (installing Switch Console and connecting an agent), and see the docs root, <https://docs.switchagents.ai>, for the rest. Do this first; later steps need a running Switch server with a Discord bridge to your server.
-2. **Clone and install.**
-   ```bash
-   git clone <this repo> kraken && cd kraken
-   python -m venv .venv
-   source .venv/bin/activate        # Windows Git Bash: source .venv/Scripts/activate
-   pip install -e ".[dev]"
-   ```
-3. **Register Kraken and fill in `.env`.** Copy `.env.example` to `.env` and set `SWITCH_URL` and `SWITCH_REGISTRATION_TOKEN`. For the model, either set `ANTHROPIC_API_KEY`, or leave it empty and Kraken uses your signed-in Claude Code CLI (`claude -p`) instead: no key, it runs on your Claude plan, about 7 s per call (`KRAKEN_LLM` forces `api` or `claude-code`). Then register:
-   ```bash
-   python scripts/register.py
-   ```
-   It reads `.env` and prints `SWITCH_AGENT_ID=...` and `SWITCH_API_KEY=...`; paste both into `.env`. If registration is rejected, the script prints Switch's error. If an earlier attempt timed out but went through, it reports the agent already exists: rerun with `--overwrite` for a fresh key.
-4. **Create the crew in one click.** In Switch Console's Templates page, run `templates/kraken-crew.template.yaml`. It creates `kraken-planner`, three bidders (`claude-coder`, `claude-coder-2`, `claude-coder-3`), `squall`, `storm-defender` and `storm-coach`, each on the first installed coding agent, with `addressing: anyone` (Kraken wakes them by @-mention), auto mode, and its own clone of this repo (the `repo` param). The names match `bidders` and `agents` in `kraken.yaml`, which seed the crew the first time Kraken starts. To bring in other vendors (Codex, Gemini, Kimi, Qwen), create those agents in Switch Console and `@kraken enlist` them (see [Crew](#crew)).
-5. **Create the HQ rooms.** In Switch Console, create the rooms from `templates/kraken-hq.template.yaml`. That makes `#kraken-requests` and `#kraken-hallmark` with Kraken in both.
-6. **Create the demo channels.** Register the smoke-test agent first (`python scripts/register.py --name kraken-smoke`, see step 10), then run `templates/kraken-demo.template.yaml` in Switch Console. It creates `#backend`, `#mobile`, `#product` and `#partners` with Kraken and `kraken-smoke` in each. For your own team, add Kraken to whichever channels it should watch instead.
-7. **Start shopfront** (the demo app Storm attacks) with chaos controls on:
-   ```bash
-   SHOPFRONT_CHAOS=1 python demo/shopfront/run.py      # API on :8080, email stub on :8081
-   ```
-   PowerShell: `$env:SHOPFRONT_CHAOS = "1"; python demo/shopfront/run.py`
-8. **Run Kraken** from the repo root (it reads `kraken.yaml` and `.env` from the current directory):
-   ```bash
-   python -m kraken.main
-   ```
-   It indexes `sonar.code_paths`, connects to Switch and starts listening.
-9. **Optional: Discord reaction relay.** Switch does not forward reactions people add, so this small bot does. Set `DISCORD_RELAY_TOKEN` (a Discord bot token for a bot in your server, with the message-content intent enabled) and `KRAKEN_RELAY_SECRET` (any shared secret) in `.env`. Restart Kraken (it opens the local relay endpoint when the secret is set), then:
-   ```bash
-   python -m kraken.relay.discord_relay
-   ```
-   Without it, replying to a prompt with just an emoji works in every chat app.
-10. **Verify.**
-    ```bash
-    pytest                                  # offline unit suite
-    python tests/golden/run_golden.py       # real-LLM precision check (API key or Claude Code CLI)
-    python scripts/smoke.py                 # live end-to-end smoke
-    ```
-    The smoke test needs Kraken running (step 8). It posts as its own agent, because Kraken ignores its own messages: register one with `python scripts/register.py --name kraken-smoke` (for any name other than `kraken` it prints `SMOKE_AGENT_ID=...` and `SMOKE_API_KEY=...`), paste both lines into `.env`, and add the agent to the demo rooms (step 6). It posts `demo/seed_chat.md` and passes when a resolution room appears. Exit codes: 0 OK, 1 timeout (no resolution room within 600 s; set `SMOKE_TIMEOUT` to change), 2 setup missing (env values or a demo room).
-
-### Resetting before a demo
-
-A rehearsal leaves claims, pairs and requests in `kraken.db`. To start clean: stop Kraken, delete `kraken.db`, and start Kraken again. You may also delete the `Hallmark` document in `#kraken-hallmark`; that is harmless but not needed, because Kraken finds the existing document by name and reuses it. The channels need no clearing: with a fresh `kraken.db` Kraken reads the stream from its head, so old messages are not judged again. The full recording run is in `docs/demo-script.md`.
-
-### Environment variables
-
-| Variable | Used by |
-|---|---|
-| `SWITCH_URL`, `SWITCH_AGENT_ID`, `SWITCH_API_KEY` | Kraken core (step 3) |
-| `ANTHROPIC_API_KEY` | Sonar, the judge, the golden run (optional: without it they use the Claude Code CLI) |
-| `KRAKEN_LLM` | `auto` (default), `api` or `claude-code`; `KRAKEN_CLAUDE_BIN` overrides the CLI path |
-| `DISCORD_RELAY_TOKEN`, `KRAKEN_RELAY_SECRET` | Optional relay (step 9) |
-| `SWITCH_REGISTRATION_TOKEN` | `scripts/register.py` only (step 3) |
-| `SMOKE_AGENT_ID`, `SMOKE_API_KEY` | `scripts/smoke.py` only (step 10) |
-| `SHOPFRONT_CHAOS=1` | Enables shopfront's fault endpoint |
-
-## Using it
-
-Ask for work in `#kraken-requests`: `@kraken build password reset`. Every prompt Kraken posts carries a tag like `[K-12]` and lists the replies it accepts. Reply in the thread with a typed command or just the emoji. With the relay running, react on the prompt message instead.
-
-### Commands
-
-| Command | Emoji | Effect |
+| Stage | What happens | Where a person comes in |
 |---|---|---|
-| `approve` | 👍 ✅ ✔ | Approve the pending gate (brief, merge, storm result) |
-| `reject [reason]` | 👎 ❌ (or `👎 reason`) | Reject, with an optional reason |
-| `pick <agent>` | 1️⃣ 2️⃣ 3️⃣ | Pick a bidder by name, or the 1st/2nd/3rd bid. In a resolution room, picks the side that is true |
-| `storm auto` | 🌪️ | Run Storm with agent attacker and defender |
-| `storm drill` | 🧪 | Run Storm with humans defending |
-| `storm skip` | ⏭️ | Skip Storm |
-| `not a conflict` | 🙅 | Dismiss a Sonar conflict; the pair is remembered |
-| `retry` | none | Retry a stage whose template run failed |
-| `agent` / `take over` / `you decide` | 🤖 | Hand the current step of this request to an agent (see [Human first](#human-first)) |
-| `me` / `I'll do it` | 🙋 | Take a handed-off step back |
-| `crew` | none | List the roster with each agent's vendor and whether it is online (requests room only) |
-| `enlist <name> [as <role>]` | none | Add a Switch agent to the crew; role defaults to `bidder` (requests room only) |
-| `retire <name>` | none | Remove an agent from the crew (requests room only) |
-| `connect <git url> [name]` | none | Clone a repo, detect how to test and run it, and add it as a project (requests room only) |
-| `projects` | none | List the connected projects and the default one (requests room only) |
-| `use <name>` | none | Make a project the default for new requests (requests room only) |
-| `project set <name> <field> <value>` | none | Fix a detected value, e.g. `project set api test npm run test:ci` (requests room only) |
+| **Spark** | A planner agent turns the request into a brief with acceptance criteria. | Answer its questions and approve the brief, or hand it to the agent. |
+| **Sonar** | Watches all rooms for decisions that contradict each other or the code (`#product` says 100 requests a day, `limits.yaml` says 1000) and checks every brief before work starts. | Settle a conflict in the resolution room it opens. |
+| **Charter** | Every coding agent bids, naming the real files it will touch. | Pick the winner, or let the judge pick and record why. |
+| **Forge** | The winner builds on its own branch; the losing bidders review it against the brief and post `ACCEPTED` only when it's met. | Give the merge OK. |
+| **Storm** | Squall (the attacker) throws bad input, floods, kills and corrupt config at the running app. | Defend yourself (fix what breaks), or let `storm-defender` do it. Then accept the result. |
+| **Deliver** | The coder pushes the branch and opens a pull request with the brief, the reviews and the Storm scorecard. | **Always a person's 👍.** Nothing leaves the chat without it. |
+| **Hallmark** | The decision ledger: who decided what, and why. Mirrored into a Switch room document. | Read it any time in `#kraken-hallmark`. |
 
-A leading `@kraken` and a trailing `.` or `!` are ignored.
+## How Kraken uses Switch
+
+Switch is not a plug-in here: Kraken is built out of it, and without Switch there is nothing left to run.
+
+| Switch feature | What Kraken does with it |
+|---|---|
+| **Rooms on Discord** (bridge) | Every stage of every request gets its own room (`#spark-k-5`, `#charter-k-5`, …), so people and agents work side by side in normal Discord channels. |
+| **Agent protocol** (SSE in, HTTP ops out) | Kraken is itself a Switch agent. One event stream (`scope=all`) lets it hear every room it belongs to. |
+| **Room templates + `run_template`** | Each stage is a template in `templates/`. Kraken creates the rooms on demand, with the right agents and people in them. |
+| **Bring any agent** | The crew is real coding agents in Switch: Claude Code (planner, three coders, three Storm agents) and Gemini through OpenCode. They all talk in the same rooms. |
+| **Agent list** (`list_agents`) | Any new coding agent added in Switch Console joins the crew and bids at the next Charter on its own: no code change, no command. |
+| **Runs** | Every room made for one request is recorded in one Switch run, a full trail from request to pull request. |
+| **Room documents** | Briefs live as documents in their stage rooms; the Hallmark ledger is mirrored as a document. |
+| **Crew template** | `templates/kraken-crew.template.yaml` creates the whole crew in Switch Console in one click. |
+
+The order of the stages lives in code (a small state machine), not in prompts. Agents report results with fixed markers on their own line (`BID:`, `ACCEPTED`, `SURVIVED`, `FAILED`, `PR:`), and Kraken reads only those.
+
+## Run it yourself
+
+**You need:** Python 3.12+, [Switch Console](https://docs.switchagents.ai/switch-rooms/getting-started) with Docker (Console runs the local Switch server), a Discord server you control, and [Claude Code](https://docs.anthropic.com/en/docs/claude-code) signed in. An Anthropic API key is optional: without one, Kraken uses your Claude Code login.
+
+### 1. Set up Switch and Discord
+
+Install Switch Console, start it (it starts the Switch server in Docker), and connect your Discord server in Console. The [10-minute quickstart](https://docs.switchagents.ai/switch-rooms/getting-started) walks through it.
+
+### 2. Install Kraken
+
+```bash
+git clone https://github.com/Anish-Juyal-01/Kraken.git
+cd Kraken
+python -m venv .venv
+source .venv/bin/activate          # Windows PowerShell: .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+```
+
+### 3. Register Kraken as a Switch agent
+
+```bash
+cp .env.example .env               # Windows: copy .env.example .env
+```
+
+In `.env`, set `SWITCH_URL` (your local Switch server) and `SWITCH_REGISTRATION_TOKEN` (from Switch Console). Then:
+
+```bash
+python scripts/register.py
+```
+
+It prints `SWITCH_AGENT_ID=...` and `SWITCH_API_KEY=...`. Paste both lines into `.env`.
+
+Leave `ANTHROPIC_API_KEY` empty to use your signed-in Claude Code instead (`KRAKEN_LLM=auto`).
+
+### 4. Create the crew and the rooms (Switch Console → Templates)
+
+1. Run **`templates/kraken-crew.template.yaml`**. It creates `kraken-planner`, `claude-coder`, `claude-coder-2`, `claude-coder-3`, `squall`, `storm-defender` and `storm-coach`.
+2. Run **`templates/kraken-hq.template.yaml`**. It creates `#kraken-requests` and `#kraken-hallmark` on your Discord, with Kraken in both.
+3. In `kraken.yaml`, set `people:` to your Discord username(s) and `bridge:` to your Discord bridge's name, so stage rooms show up on Discord with you in them.
+
+Want Gemini, Codex or another vendor too? Create that agent in Switch Console (set its addressing to **Anyone**, so it answers Kraken's mentions). It joins the crew by itself.
+
+### 5. Start Kraken
+
+```bash
+python -m kraken.main
+```
+
+Run it from the repo root (it reads `kraken.yaml` and `.env` there). It connects to Switch and starts listening.
+
+### 6. Use it from Discord
+
+In `#kraken-requests`:
+
+```
+@kraken connect https://github.com/you/your-repo
+@kraken build your-repo: add input validation to POST /orders
+```
+
+Then follow the rooms Kraken opens. Each question says what you can reply.
+
+### Check it works
+
+```bash
+pytest                             # 448 offline tests (fake Switch, fake LLM), no keys needed
+python scripts/smoke.py            # optional live end-to-end check (see below)
+```
+
+<details>
+<summary>Optional extras: the demo app, the smoke test, the reaction relay, resetting</summary>
+
+- **Shopfront demo app** (the bundled app Sonar's demo conflicts are about):
+  `SHOPFRONT_CHAOS=1 python demo/shopfront/run.py` (PowerShell: `$env:SHOPFRONT_CHAOS = "1"; python demo/shopfront/run.py`). Run `templates/kraken-demo.template.yaml` for the demo channels (`#backend`, `#mobile`, `#product`, `#partners`).
+- **Smoke test:** register a second agent with `python scripts/register.py --name kraken-smoke`, paste the printed `SMOKE_AGENT_ID` / `SMOKE_API_KEY` into `.env`, add it to the demo rooms, and run `python scripts/smoke.py` while Kraken runs. It posts `demo/seed_chat.md` and passes when Sonar opens a resolution room (exit 0 OK, 1 timeout, 2 setup missing).
+- **Reaction relay:** Switch doesn't forward emoji reactions, so replying with the emoji as a message is the normal way. To use real reactions, set `DISCORD_RELAY_TOKEN` and `KRAKEN_RELAY_SECRET` in `.env`, restart Kraken, and run `python -m kraken.relay.discord_relay`.
+- **Reset before a demo:** stop Kraken, delete `kraken.db`, start Kraken again.
+- **Real-LLM precision check for Sonar:** `python tests/golden/run_golden.py`.
+
+</details>
 
 ## Human first
 
-Every step is a person's by default. Hand one to an agent when you don't want to do it: reply 🤖 (or `agent`) in that step's room. It applies to that step of that request only; the next request starts human-first again. Reply 🙋 (or `me`) to take it back before the agent finishes.
+Every step belongs to a person until they say otherwise. When a step needs someone, Kraken asks **"Who's handling this?"**:
 
-| Step | You do it (default) | 🤖 hands it to |
+- reply **🙋** or `me` (or just start answering): it's yours, **no time limit**;
+- reply **🤖** or `agent`: the agent does it;
+- **no answer in 2 minutes:** the agent takes it, and Kraken says so in the room.
+
+| Step | If you take it | If the agent takes it |
 |---|---|---|
-| **Spark** | The planner asks only what it can't work out from the request and the code (often nothing). You answer, then approve the brief | The planner: it decides the open answers itself and lists them as *Assumptions* in the brief |
-| **Charter** | You read the bids and pick one (1️⃣ 2️⃣ 3️⃣) | The judge: it picks the plan that best meets the acceptance criteria and records why |
-| **Forge** | Agents build and review; you give the merge OK | The reviewers: their `ACCEPTED` is enough |
-| **Storm** | Drill: Squall breaks things, you fix them, the coach scores you | `storm-defender`: it switches the round to auto and patches the faults |
-| **Pull request** | You approve it | Nobody: nothing leaves the chat without a person |
+| **Spark** | You answer the planner and approve the brief. | The planner decides open questions itself and lists them as *Assumptions*. |
+| **Charter** | You pick a bid (1️⃣ 2️⃣ 3️⃣ …). | The judge picks the best bid and records why. |
+| **Forge** | You give the merge OK. | The reviewers' `ACCEPTED` is enough. |
+| **Storm** | You defend: fix what Squall breaks, the coach scores you. Then you accept the result. | `storm-defender` patches the faults; the result is accepted. |
+| **Pull request** | You approve it. | Never: the pull request always waits for a person. |
 
-You only have to say who handles each step, not finish it in a hurry. When a step needs a person, Kraken asks *"Who's handling this?"*: reply 🙋 (or `me`, or just start answering in the room) and it's yours with no time limit; reply 🤖 and the agent does it. If nobody answers within `human_wait_s` (default 120 seconds), the agent takes it and Kraken says so in the room. You can still reply 🤖 later on a step you took. `human_wait_s: 0` always waits for people. The pull request is never handed off.
+A handoff covers one step of one request; the next request starts human-first again. Set `human_wait_s: 0` in `kraken.yaml` to always wait for people, or set a step's `autonomy` key to `auto` to always give it to agents.
 
-Every handoff is announced in the room and recorded on the request (`handoff`, `handoff_by`). To hand a step to agents for every request, set its `autonomy` key to `auto`, or `storm.default_mode: auto`.
+## Chat commands
 
-## Use Kraken on your own repo
+Every prompt carries a tag like `[K-12]` and lists the replies it accepts. A leading `@kraken` is optional in stage rooms.
 
-1. **Connect it.** In `#kraken-requests`: `@kraken connect https://github.com/you/your-repo`. Kraken clones it into `workspace/<name>`, works out the language, the test command, how to run it, where the code and config files are, and posts a summary. Fix anything it got wrong: `@kraken project set your-repo run "npm run start:prod"`. From a terminal instead: `python -m kraken.init path/to/checkout --repo <url>` writes the same into `kraken.yaml`.
-2. **Ask for work.** `@kraken build your-repo: add input validation to POST /orders` (or just `@kraken build …` for the default project; `@kraken use your-repo` changes it).
-3. **Watch the rooms.** Every stage room carries a *Project* section: the repo, base branch, test and run commands. Each agent clones the repo into `projects/<name>` in its own folder and works on the branch `kraken/K-<n>`; reviewers run the tests.
-4. **Storm attacks it from outside.** With a `run` command Storm starts the app itself and injects faults without touching its code: kill and restart, latency and dropped connections through a proxy, malformed and oversized input (a 5xx is a bug), floods, corrupt config files, missing environment variables. Without one (a library or CLI) it runs the tests under the faults and compares with a clean run. `python -m storm.faults --project <file> --list` shows what applies.
-5. **Approve the pull request.** When Storm survives, Kraken asks *"Open a pull request?"* in the Storm room. Nothing leaves the chat without a person's 👍, whatever the autonomy settings. Then the coder pushes and opens the PR (through its own `gh` login) and Kraken posts the link. Set `deliver: branch` to keep work local instead.
-
-Works with Python (FastAPI, Flask, Django), Node (Express, Fastify, Nest, Koa, Hono), Go and Rust out of the box; anything else connects too, and `project set` fills in the commands. Sonar reads YAML, JSON, TOML, `.env.example`, OpenAPI, Python classes, TypeScript types and Go structs for chat-vs-code conflicts.
-
-## Crew
-
-The crew is Kraken's roster of agents: the Charter bidders and the single-seat roles (`planner`, `attacker`, `defender`, `coach`). It lives in Kraken's database, not in `kraken.yaml`, and people manage it from `#kraken-requests`:
-
-```
-@kraken crew
-@kraken enlist kimi-coder
-@kraken enlist qwen-coder as bidder
-@kraken retire opencode-coder
-```
-
-- `crew` prints one line per role. Each agent shows its vendor and whether it is online (`●`) or offline (`○`), e.g. `bidder: claude-coder (claude-code) ● · kimi-coder (opencode · moonshot/kimi-k2) ○`. Vendor and liveness come from Switch (`known_agent_type`, the agent's first listed model, and its sessions).
-- `enlist <name>` checks that Switch has an agent with that exact name. An agent holds one role, so enlisting it under a new role moves it. Roles: `bidder`, `planner`, `attacker`, `defender`, `coach`.
-- **New agents join on their own.** At every Charter, Kraken asks Switch for its agents; any coding agent (Claude Code, Codex, OpenCode, Antigravity, Cursor, …) not yet on the crew becomes a bidder and Kraken announces it. Add agents in Switch Console and they bid in the next round: no Kraken change and no command. Custom agents without a coding type never auto-join. Turn it off with `charter.auto_join: false`, or keep names out with `charter.never_join`.
-- `retire <name>` takes the agent off the crew, and auto-join leaves it off until someone enlists it again.
-- The commands work only in the requests room (`rooms.requests`), and messages from crew agents are ignored, so agents cannot reshape the crew.
-- For the single-seat roles Kraken uses the first member listed.
-- `kraken.yaml`'s `bidders` and `agents` are only the initial seed: Kraken copies them into the database once, on first start. Editing them afterwards changes nothing; use the commands, or delete `kraken.db` (which also clears claims and requests) to reseed.
-- A request already past Charter keeps the bidders it chose. Roster changes apply from the next Charter.
-
-### Vendors
-
-| Vendor | Shown as | How it joins |
+| Command | Emoji | What it does |
 |---|---|---|
-| Claude | `claude-code` | Claude Code agent |
-| GPT | `codex` | Codex agent |
-| Gemini | the agent's Switch type | Antigravity agent |
-| Kimi, Qwen, DeepSeek and others | `opencode · <model>` | OpenCode agent; the model name tells the vendors apart |
-| Anything else | `custom` | Any agent that speaks the Switch protocol |
+| `approve` / `reject [reason]` | 👍 / 👎 | Answer the pending question |
+| `pick <agent>` | 1️⃣ 2️⃣ 3️⃣ … | Pick a bid |
+| `me` / `agent` | 🙋 / 🤖 | Take a step yourself / hand it to the agent |
+| `storm auto` / `storm drill` / `storm skip` | 🌪️ / 🧪 / ⏭️ | Agents defend / people defend / no Storm |
+| `not a conflict` | 🙅 | Dismiss a Sonar conflict |
+| `retry` | | Retry a stage that failed to open |
+| `connect <git url> [name]` | | Add a repo: Kraken clones it and works out the language, tests and run command |
+| `projects` / `use <name>` | | List repos / choose the default |
+| `project set <name> <field> <value>` | | Fix a detected value, e.g. `project set api test npm run test:ci` |
+| `crew` / `enlist <name> [as <role>]` / `retire <name>` | | Show / add to / remove from the crew |
 
-### Choosing bidders
+`connect`, `projects`, `use`, `project set`, `crew`, `enlist` and `retire` work in `#kraken-requests`.
 
-At Charter, Kraken asks the bidders that are online. If more than `charter.max_bidders` (default 5) are online it seats a subset, preferring different vendors. It takes one agent per vendor first, then fills any remaining seats in order. The scan start rotates by one at every Charter, so the same agents do not always win the seats. OpenCode agents count as different vendors when their first listed model differs. With more than nine bids the pick prompt adds `…or reply pick <name>`, since only nine keycaps exist.
+## Works on any repo, with any agent
 
-## Configuration (`kraken.yaml`)
+**Repos.** `@kraken connect <url>` detects Python (FastAPI, Flask, Django), Node (Express, Fastify, Nest, Koa, Hono), Go and Rust; anything else connects too, and `project set` fills in the commands. Each agent clones the repo into its own folder and works on branch `kraken/K-<n>`. Storm attacks from the outside, so the app needs no changes: with a run command it starts the app and injects kills, latency, dropped connections, bad and oversized input, floods, corrupt config and missing environment variables; for a library or CLI it runs the tests under faults and compares with a clean run.
+
+**Agents.** At every Charter Kraken asks Switch for its agents. Any coding agent not yet on the crew (Claude Code, Codex, OpenCode with Gemini, Kimi or Qwen, Antigravity, Cursor, …) becomes a bidder, and Kraken announces it. `@kraken retire <name>` removes one; `charter.auto_join: false` turns this off. If more than 5 bidders are online, Kraken seats a mix of vendors and rotates who gets in.
+
+<details>
+<summary>Configuration (<code>kraken.yaml</code>)</summary>
 
 | Key | Default | Meaning |
 |---|---|---|
+| `people` | `[]` | Discord usernames added to every stage room |
+| `bridge` | | Name of your Discord bridge in Switch |
+| `human_wait_s` | `120` | Seconds Kraken waits for a person before the agent takes the step (`0` = always wait) |
+| `agent_quiet_s` | `600` | Nudge agents that have been silent this long |
+| `autonomy.brief` / `pick` / `merge` / `storm_result` | `human` | `auto` gives that step to agents for every request |
+| `storm.default_mode` | `drill` | `drill` (people asked first), `auto` or `skip` |
+| `storm.max_rounds` | `3` | Storm → Forge loops before a person is pinged |
+| `deliver` | `pr` | `pr` opens a pull request after a person's 👍; `branch` keeps work local |
+| `charter.auto_join` | `true` | New Switch agents join the crew by themselves |
+| `charter.never_join` | `[]` | Agent names that never auto-join |
+| `charter.max_bidders` | `5` | Most bidders in one Charter |
+| `projects` / `default_project` | shopfront | Seed repos; more are added from chat and kept in `kraken.db` |
+| `bidders`, `agents.*` | the crew template's names | Initial crew; after the first start the crew lives in `kraken.db` |
 | `sonar.threshold` | `0.75` | Minimum confidence to raise a conflict |
-| `projects` | `[]` (shopfront in the repo file) | Seed list of codebases: `name`, `repo`, `branch`, `description`, `code_paths`, `test`, `run`, `base_url`, `health`, `endpoints`, `config_files`, `chaos_endpoint`. More are added from chat and kept in `kraken.db` |
-| `default_project` | first project | Project used when a request doesn't name one |
-| `workspace` | `workspace` | Where Kraken clones connected repos |
-| `deliver` | `pr` | `pr`: after Storm, ask a person, then open a pull request; `branch`: leave work on the coder's branch |
-| `sonar.code_paths` | `[]` | Old single-codebase key; still read as a project named `default` |
-| `sonar.min_words` | `6` | Messages shorter than this are ignored |
-| `storm.max_rounds` | `3` | Storm-to-Forge loops before a human is pinged |
-| `storm.default_mode` | `drill` | `drill` (people defend, 🤖 hands it to the defender), `auto` or `skip` |
-| `autonomy.brief` | `human` | `human` (reply `approve`) or `auto` |
-| `autonomy.pick` | `human` | `human` (reply `pick`) or `auto` (LLM judge picks the best bid) |
-| `autonomy.merge` | `human` | Gate after reviewers post `ACCEPTED` |
-| `autonomy.storm_result` | `human` | Gate after the coach posts `SURVIVED` |
-| `rooms.requests` | `kraken-requests` | Name of the requests room |
-| `rooms.hallmark` | `kraken-hallmark` | Name of the Hallmark room |
-| `charter.max_bidders` | `5` | Most bidders seated in one Charter (at least 1); vendor-diverse choice when more are online |
-| `bidders` | `[]` (`[claude-coder, claude-coder-2, claude-coder-3]` in the repo file) | Initial seed for the crew's bidders (see [Crew](#crew)) |
-| `kraken_agent` | `kraken` | Kraken's agent name |
-| `agents.planner` | `kraken-planner` | Initial seed for the planner |
-| `agents.attacker` | `squall` | Initial seed for the attacker |
-| `agents.defender` | `storm-defender` | Initial seed for the defender |
-| `agents.coach` | `storm-coach` | Initial seed for the coach |
-| `timeouts_s.spark` / `charter` / `forge` / `storm` / `deliver` | `1800` / `900` / `3600` / `1800` / `3600` | Per-stage timeout in seconds; on expiry Kraken pings the owner |
-| `db_path` | `kraken.db` | SQLite file for claims, decisions and request state |
-| `relay_port` | `8765` | Local port for the reaction relay endpoint |
+| `rooms.requests` / `rooms.hallmark` | `kraken-requests` / `kraken-hallmark` | Room names |
+| `timeouts_s.*` | 15–60 min | Per-stage timeout; on expiry Kraken pings the owner |
+| `db_path` | `kraken.db` | SQLite file for requests, claims and decisions |
+
+Environment variables: `SWITCH_URL`, `SWITCH_AGENT_ID`, `SWITCH_API_KEY` (required); `ANTHROPIC_API_KEY` and `KRAKEN_LLM` (`auto`, `api`, `claude-code`); `SWITCH_REGISTRATION_TOKEN` (registration only); `SMOKE_*`, `DISCORD_RELAY_TOKEN`, `KRAKEN_RELAY_SECRET` (optional extras).
+
+</details>
+
+## What's verified
+
+- **Offline:** 448 tests pass (`pytest`), with fake Switch and fake LLM servers: the state machine, human-first waits and handoffs, auto-join, the command parser, Sonar, Storm faults, repo detection and the Switch client.
+- **Live on Discord through Switch:**
+  - the full pipeline on the bundled shopfront app;
+  - `@kraken connect` and a full build on [fastapi-todo](https://github.com/renceInbox/fastapi-todo) (request K-5), where Storm found and fixed the 64-bit ID crash;
+  - human-first prompts with the 2-minute takeover;
+  - Gemini (through OpenCode) auto-joining and bidding next to the Claude coders.
+- **Not done live yet:** a pull request opened on a real remote repo (the K-5 work stayed on a local branch), and Sonar's real-LLM precision run.
 
 ## Repo map
 
-- `kraken/` core service: `sonar/`, `hallmark/`, `conductor/`, `relay/`, `crew.py`, `projects.py` (connected codebases), `init.py` (repo detection), `workspace.py` (clones), `switch_client.py`, `main.py`
-- `templates/` Switch room templates, one per stage plus `kraken-hq`
-- `storm/` fault toolkit: `faults.py` (CLI), `project_faults.py` (faults for any project), `target.py` (starts and stops the app), `proxy.py` (network faults in front of it)
-- `demo/shopfront/` the tiny two-service app with seeded drift; `demo/seed_chat.md` the demo messages
-- `tests/` unit suite, with the golden set in `tests/golden/`
-- `docs/demo-script.md` and `docs/blog-draft.md` submission material
-
-## Status / what's verified
-
-- **Verified:** the unit suite (`pytest`) passes offline, using fake LLM and fake Switch servers. It covers extraction, normalization, detection, code checks, the command parser, the conductor state machine, the Switch client (reconnect, gap, heartbeat), templates, the relay and shopfront.
-- **Not verified here:** live runs against a real Switch server and Discord (`scripts/smoke.py`, the relay, the stage agents) and the golden-set precision run (target 0.9, needs your `ANTHROPIC_API_KEY`). These are for you to run with your own keys.
-- Switch's task operations are documented as not ready, so Kraken does not use them.
-- Out of scope: a web UI, relays for apps other than Discord, Jira/Linear sync, multi-repo code indexing, production hardening.
+| Path | What's there |
+|---|---|
+| `kraken/` | The service: `conductor/` (state machine and stage runner), `dispatch.py` (chat events, human-first waits), `sonar/`, `hallmark/`, `crew.py`, `projects.py`, `init.py` (repo detection), `switch_client.py`, `main.py` |
+| `templates/` | Switch templates: one per stage, plus the crew, HQ and demo rooms |
+| `storm/` | Fault toolkit: starts the app, proxies it, injects faults |
+| `demo/` | Shopfront demo app and seed chat |
+| `tests/` | Offline test suite and Sonar's golden set |
+| `docs/` | Demo script and blog draft |

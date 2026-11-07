@@ -336,3 +336,33 @@ async def test_agents_cannot_hand_off_for_people(ledger):
     rid = request_in(ledger, "CHARTER", rooms={"charter": "ch"}, data={"gate": "pick"})
     await d.handle(ev(1, "🤖", room="ch", name="claude-coder"))  # a crew agent
     assert "handoff" not in ledger.get_request(rid).data
+
+
+async def test_storm_asks_who_defends_as_soon_as_it_opens(ledger):
+    client, d = make(ledger, human_wait_s=120, deliver="branch", people=["anish_2007"])
+    rid = request_in(ledger, "FORGE", rooms={"forge": "fg"}, winner="claude-coder",
+                     storm_mode="drill", data={"gate": "merge", "gate_since": 1000.0})
+    await d.handle(ev(1, "approve", room="fg", name="sam"))
+    req = ledger.get_request(rid)
+    st = req.rooms["storm"]
+    ask = client.texts(st)[-1]
+    assert req.state == "STORM" and req.data["defend_since"] is not None
+    assert ask.startswith("@anish_2007 [K-1] Storm is starting") and "No answer in 2 min" in ask
+    await d.handle(ev(2, "🙋", room=st, name="anish_2007"))  # a person defends: no time limit
+    assert ledger.get_request(rid).data["claimed"] == {"defend": "anish_2007"}
+    await d.handle(ev(3, "/v2/ping 500s on bad input. @storm-defender @storm-coach", room=st, name="squall"))
+    note = client.texts(st)[-1]
+    assert note.startswith("@anish_2007 [K-1] Squall has broken things") and "No answer" not in note
+    await d.tick(10**9)
+    assert ledger.get_request(rid).storm_mode == "drill"  # still the person's
+
+
+async def test_storm_nobody_answers_the_defender_takes_it(ledger):
+    client, d = make(ledger, human_wait_s=120, deliver="branch")
+    rid = request_in(ledger, "FORGE", rooms={"forge": "fg"}, winner="claude-coder",
+                     storm_mode="drill", data={"gate": "merge", "gate_since": 1000.0})
+    await d.handle(ev(1, "approve", room="fg", name="sam"))
+    since = ledger.get_request(rid).data["defend_since"]
+    await d.tick(since + 121)
+    req = ledger.get_request(rid)
+    assert req.storm_mode == "auto" and req.data["defend_handed"]

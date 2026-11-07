@@ -283,14 +283,16 @@ class Dispatcher:
                                        "something (above). " + self._wait_note("answer it here"),
                                   "spark")
         elif (stage == "storm" and req.state == "STORM" and req.storm_mode == "drill"
-              and sender == self.crew.primary("attacker") and d.get("defend_since") is None
+              and sender == self.crew.primary("attacker") and not d.get("broke_noted")
               and f"@{self.crew.primary('defender')}" in body):
-            merge_data(self.ledger, rid, defend_since=now)
+            asked = d.get("defend_since") is not None  # the who-defends question went out already
+            merge_data(self.ledger, rid, broke_noted=True,
+                       **({} if asked else {"defend_since": now}))
             people = " ".join(f"@{p}" for p in self.cfg.people)
             await self.runner.say(
                 req, f"{people} [K-{req.id}] Squall has broken things (above): it's your turn to "
                 f"defend. Fix them on kraken/K-{req.id}, then tell @{self.crew.primary('coach')} "
-                "you're done. " + self._wait_note("defend"), "storm")
+                "you're done." + ("" if asked else " " + self._wait_note("defend")), "storm")
 
     async def tick(self, now: float) -> None:
         async with self._lock:
@@ -599,6 +601,22 @@ class Dispatcher:
         await self.runner.run(new, actions)
         if new.state == "PREFLIGHT" and req.state != "PREFLIGHT":
             await self._preflight(new)
+        if new.state == "STORM" and req.state != "STORM":
+            await self._ask_defenders(self.ledger.get_request(rid))
+
+    async def _ask_defenders(self, req: Request) -> None:
+        """Human first in Storm too: the moment the round opens, ask who defends. The clock
+        starts now, not when Squall first breaks something."""
+        if req.storm_mode != "drill" or self.cfg.human_wait_s <= 0 or "storm" not in req.rooms:
+            return
+        merge_data(self.ledger, req.id, defend_since=time.time(), defend_handed=None,
+                   broke_noted=None, claimed={k: v for k, v in req.data.get("claimed", {}).items()
+                                              if k != "defend"})
+        people = " ".join(f"@{p}" for p in self.cfg.people)
+        await self.runner.say(
+            req, f"{people} [K-{req.id}] Storm is starting: Squall attacks the build next. "
+            f"You defend (fix what breaks), or @{self.crew.primary('defender')} does. "
+            + self._wait_note("defending"), "storm")
 
     async def _preflight(self, req: Request) -> None:
         try:
