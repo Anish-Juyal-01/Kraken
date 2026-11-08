@@ -70,7 +70,30 @@ The order of the stages lives in code (a small state machine), not in prompts. A
 
 ### 1. Set up Switch and Discord
 
-Install Switch Console, start it (it starts the Switch server in Docker), and connect your Discord server in Console. The [10-minute quickstart](https://docs.switchagents.ai/switch-rooms/getting-started) walks through it.
+Install Switch Console and start it; it starts the Switch server in Docker. The [10-minute quickstart](https://docs.switchagents.ai/switch-rooms/getting-started) walks through it.
+
+**Connect your Discord server.** There is no Kraken bot to invite: Kraken talks to Discord through Switch's Discord connection. You make one Discord bot for your team and connect it once. These steps follow [Switch's Discord guide](https://docs.switchagents.ai/switch-rooms/deploy/messaging-apps/discord):
+
+1. **Create the bot.** In the [Discord Developer Portal](https://discord.com/developers/applications), select **New Application** and name it (for example "Kraken"). Open the **Bot** tab and copy the bot's token. Keep it secret.
+2. **Turn on two intents.** Still on the **Bot** tab, under *Privileged Gateway Intents*, turn on **Server Members Intent** and **Message Content Intent**, then **Save Changes**. Without Message Content, agents receive empty messages.
+3. **Invite the bot to your server.** Open **OAuth2 → URL Generator**. Tick the scopes `bot` and `applications.commands`, then these permissions:
+   - View Channels
+   - Send Messages and Send Messages in Threads
+   - Manage Webhooks (each agent posts under its own name)
+   - Manage Channels and Manage Roles
+   - Read Message History
+   - Attach Files and Add Reactions
+
+   Open the URL it generates and add the bot to your Discord server.
+4. **Copy your server ID.** In Discord, open **User Settings → Advanced** (called *Developer* in some versions), turn on **Developer Mode**, then right-click your server's icon and select **Copy Server ID**.
+5. **Connect it in Switch Console.** Open your Switch server's **Home** page, find **Messaging apps** and select **Connect → Discord**. Enter:
+   - **Name:** for example `Dc Switch`. You'll put this name in `kraken.yaml` later (section 4 below).
+   - **Bot Token:** the token you copied from the Bot tab.
+   - **Guild Id:** the server ID you just copied.
+
+   Select **Connect**, then pick your own Discord account and select **This is me**.
+
+**Your teammates install nothing.** They only need to be in the Discord server and listed under `people:` in `kraken.yaml` (section 4 below), so Kraken adds them to every request's rooms. Whoever asks for something is added to that request's rooms automatically.
 
 ### 2. Install Kraken
 
@@ -102,7 +125,7 @@ Kraken also needs a model for its own thinking (spotting conflicts, judging bids
 
 1. Run **`templates/kraken-crew.template.yaml`**. Its **provider** field picks the coding agent the crew runs on: `claude` (default), `codex`, `opencode`, or whatever your Console lists. It creates three coders named after that agent (`codex-coder`, `codex-coder-2`, `codex-coder-3` for `codex`; `claude-coder`, … for `claude`) plus `kraken-planner`, `squall`, `storm-defender` and `storm-coach`. The coders join Kraken's crew on their own at the first Charter.
 2. Run **`templates/kraken-hq.template.yaml`**. It creates `#kraken-requests` and `#kraken-hallmark` on your Discord, with Kraken in both.
-3. In `kraken.yaml`, set `people:` to your Discord username(s) and `bridge:` to your Discord bridge's name, so stage rooms show up on Discord with you in them.
+3. In `kraken.yaml`, set `bridge:` to the **Name** you gave the Discord connection in section 1 (for example `Dc Switch`), and `people:` to your team's Discord usernames (for example `people: [anish_2007, priya]`). Stage rooms then open as Discord channels with all of you in them. Restart Kraken after adding someone.
 
 Want Gemini, Codex or another vendor too? Create that agent in Switch Console (set its addressing to **Anyone**, so it answers Kraken's mentions). It joins the crew by itself.
 
